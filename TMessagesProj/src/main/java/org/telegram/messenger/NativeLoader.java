@@ -30,6 +30,10 @@ public class NativeLoader {
     private static volatile boolean nativeLoaded = false;
     public static StringBuilder log = new StringBuilder();
 
+    // Desktop ports build the JNI library for the host libc and put it on disk,
+    // so there is nothing to extract from the apk.
+    private final static String NATIVE_PATH_PROPERTY = "tmessages.native.path";
+
     private static File getNativeLibraryDir(Context context) {
         File f = null;
         if (context != null) {
@@ -112,6 +116,15 @@ public class NativeLoader {
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     public static synchronized void initNativeLibs(Context context) {
         if (nativeLoaded) {
+            return;
+        }
+
+        String nativePath = System.getProperty(NATIVE_PATH_PROPERTY);
+        if (nativePath != null && nativePath.length() != 0) {
+            // deliberate: a failure here is a broken setup, not something to
+            // recover from by unpacking the apk's Android build
+            System.load(nativePath);
+            nativeLoaded = true;
             return;
         }
 
