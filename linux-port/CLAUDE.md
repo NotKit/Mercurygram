@@ -5,8 +5,12 @@
   or a JDK version in a build script — the toolchain is pinned in one place.
 - All products go under `linux-port/out/` (gitignored). Nothing generated is
   committed; scripts must be idempotent and safe to re-run.
-- `$ATLAS_DIR` is read-only: build it and copy artifacts out, never patch it.
-  atlas bugs get fixed in the atlas repo, not worked around here.
+- `$ATLAS_DIR` is `linux-port/atlas/`: an atl-touch checkout on branch
+  `mercurygram/openjdk-port`, its own git repo, gitignored by this one. It is a
+  source dependency the port builds, not a place artifacts are copied from. Fix
+  framework bugs there as commits that could be sent upstream to atl-touch; never
+  patch atlas from this repo and never paper over a framework bug in the shim jar
+  or the launcher.
 - Run `check-env.sh` before debugging a build failure; it catches a wrong JDK
   (needs 21.x) and a missing atlas checkout, the two usual causes.
 - `native/build_*_linux.sh` mirror the Android `TMessagesProj/jni/build_*.sh`:
@@ -44,5 +48,21 @@
 - Verification helpers written in Java go in `tools/`, built into
   `$PORT_OUT/tools` by the script that uses them — same idea as
   `native/tools/dlopen_check.c`.
+- atlas is built by `build-atlas.sh` from `$ATLAS_DIR` into `$ATLAS_BUILDDIR`
+  (`out/atlas-build/`) and installed
+  into `$ATLAS_OUT` (`out/atlas/`), which is both the framework jar's home and the natives dir
+  (`java.library.path`). Read `out/atlas/ARTIFACTS.md` for what each file is. The
+  framework jar is atlas's `hax-stripped.jar` (pre-dex javac output) — never
+  atlas's `api-impl.jar`, which is a `classes.dex`.
+- atlas's javac writes generated JNI headers into its own source tree. That is
+  now expected: commit them on the atlas branch like any other change, and keep
+  the checkout otherwise clean so a real diff stays visible.
+- Build atlas with the port's JDK 21 (`env.sh`), not the system default (25) —
+  meson's `jni` dependency and javac must match the runtime. meson caches the java
+  compiler in coredata, so a JDK change needs `meson setup --wipe` (what
+  `build-atlas.sh --reconfigure` does), and that means rebuilding skia too;
+  `build-atlas.sh` stamps the builddir with its JDK so it happens once.
+- `linux-port/atlas/subprojects/skia` is a symlink to the shared ~8 GB skia tree.
+  Never delete or re-download it; `--clean` means the builddir, not the sources.
 - Record every deviation from the Android build in `BRINGUP_NOTES.md` as it is
   found; that file is the memory between sessions.

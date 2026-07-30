@@ -159,3 +159,89 @@ One entry per problem: symptom → cause → where it is handled.
   cannot resolve yet — they extend `android.app.Application`/`Activity`.
   `PortClassCheck --needs-android` asserts the failure is *only* that, so the
   check stays meaningful until the atlas framework jar lands.
+  (Resolved once it did: with `out/atlas/api-impl.jar` on the classpath all three
+  app entry classes load.)
+
+## atlas framework build
+
+- **The pre-dex jar is `hax-stripped.jar`, not `api-impl.jar`.** atlas builds
+  `src/api-impl/hax.jar` with javac, strips three compile-only stubs from it
+  (`meson.build:274`), and only then runs `dx --dex` into `api-impl.jar`
+  (`meson.build:279`) — which holds a single `classes.dex`. The port installs
+  `hax-stripped.jar` and *names* it `api-impl.jar` in `out/atlas/`, because that
+  is the name the PRD and the launcher use; the copy is asserted dex-free.
+- **The three stripped stubs stay stripped.** `OnReceiveContentListener`,
+  `WindowInsetsAnimation$Callback` and `OnBackInvokedCallback` exist in atlas only
+  so the framework compiles against SDK31+ types; the app's bundled androidx
+  provides them from `out/classpath/`. The reason atlas strips them (ART's
+  duplicate-class check rejecting the oat file) does not apply to HotSpot, but
+  keeping the ART layout means one definition instead of two.
+- **`out/atlas/` is a flat natives dir on purpose.** `libtranslation_layer_main.so`
+  is linked with RUNPATH `$ORIGIN/:$ORIGIN/subprojects/skia:/usr/local/lib/art`,
+  so installing `subprojects/skia/libskia.so` next to it is enough — no
+  `LD_LIBRARY_PATH` needed for the atlas side. The AOSP support libraries
+  (`libandroidfw`, `liblog`, `libbase`, `libcutils`, `libutils`, `libziparchive`)
+  come from the absolute `/usr/local/lib/art` entry and are a host prerequisite,
+  not artifacts to copy.
+- **The port builds atlas itself** (`build-atlas.sh`, replacing the first pass's
+  `get-atlas-artifacts.sh`, which copied out of an external builddir). Sources:
+  `linux-port/atlas` on branch `mercurygram/openjdk-port`; builddir:
+  `out/atlas-build`; install dir: `out/atlas`. The framework's javac writes
+  generated JNI headers back into `src/api-impl-jni/generated_headers`, which is
+  now expected — they get committed on the atlas branch. The script diffs
+  `git status` of the checkout around the build and fails on any change outside
+  that directory.
+- **A JDK change needs `meson setup --wipe`, not `--reconfigure`.** meson caches
+  the java compiler in the builddir's coredata, so re-running configuration keeps
+  whichever `javac` was found first — here the system default 25 instead of the
+  port's 21. `build-atlas.sh` writes the JDK it configured with to
+  `$ATLAS_BUILDDIR/.port-jdk` and wipes when that no longer matches `$JAVA_HOME`,
+  which also costs a skia rebuild, hence the stamp rather than an unconditional
+  reconfigure.
+- **`meson setup --wipe <builddir>` alone fails**: with a single argument meson
+  reads it as the *source* directory ("Neither source directory … nor build
+  directory None contain a build file meson.build"). Pass both dirs.
+- **Source edits do reach the port** (the atlas build's acceptance check). Adding
+  `public static final int PORT_BUILD_PROBE = 42;` to
+  `linux-port/atlas/src/api-impl/android/os/Looper.java` and re-running
+  `build-atlas.sh` moved `out/atlas/api-impl.jar` from sha `ffac56a0e25b00b2` to
+  `306a73446d33cf2a`, and `javap -p -cp out/atlas/api-impl.jar android.os.Looper`
+  listed the new field. Reverting the file and rebuilding removed it again.
+- **That jar sha identifies a build, not the sources.** Reverting the probe gave a
+  third sha (`f164e855863a1823`) for identical sources: jar entries carry
+  timestamps. Compare `javap` output, not hashes, when checking whether a
+  framework change landed.
+- **The framework's javac emits 413 warnings** (deprecation-adjacent, unchecked)
+  against JDK 21 and still produces a 1792-class jar. Not worth chasing; the
+  warnings predate the port.
+- **A full atlas build is ~95s here** (886 skia targets included, 12 cores), an
+  incremental re-run ~4s. Building skia from scratch is far cheaper than the
+  first pass's notes assumed, so `--clean` is not something to avoid.
+- **The generated JNI headers are tracked by atlas** (97 files under
+  `src/api-impl-jni/generated_headers`) and the build rewrites them with identical
+  content, so the checkout stays clean. They only show up as a diff when a
+  framework signature actually changes — which is exactly when they should be
+  committed on the atlas branch.
+- **`libtmessages.49.so` bakes `$ATLAS_BUILDDIR` into its RUNPATH**, so moving the
+  builddir in tree left the libtmessages artifact pointing at the old external path.
+  Re-run `native/build_tmessages_linux.sh` after any change to `$ATLAS_BUILDDIR`;
+  the RUNPATH is now `$ORIGIN:$ORIGIN/atlas:<repo>/linux-port/out/atlas-build`.
+- **`libtranslation_layer_main.so` has no `JNI_OnLoad`.** The launcher's acceptance
+  wording expects one; the library exports statically named
+  `Java_android_*` entry points instead, so loading it produces no log line of
+  its own. Verify it by calling into it, not by watching for `JNI_OnLoad`.
+- **`fonts.xml` is dead weight here.** Only atlas's own executable looks at
+  `/system/etc/fonts.xml`, through the bionic-shim path-override table in
+  `src/main-executable/libc_bio_path_overrides.c`; the framework itself uses
+  Skia's fontconfig `SkFontMgr` (`hwui/TypefaceCollection.cpp`). Copied for
+  reference at `out/atlas/system/etc/fonts.xml`.
+- **`framework-res.apk` carries no code** (2480 entries, zero `.class`/`.dex`).
+  atlas puts it on `java.class.path` purely so the resource table can be found;
+  on HotSpot that is just an extra zip on the classpath.
+- **atlas compiles its framework against ART's libcore**, not against a JDK:
+  `-bootclasspath <libart libdir>/java/core-all_classes.jar` with
+  `-source/-target 1.8` (`src/api-impl/meson.build:861`), which is why the
+  classes are major version 52. On this machine that jar is
+  `/usr/local/lib/java/core-all_classes.jar` — useful for the shim: `javap` against
+  it shows what a framework class could legally have been compiled against, and
+  the difference from HotSpot's `java.base` is exactly what the shim jar covers.

@@ -24,5 +24,7 @@ API_KEYS
 .env
 # Build products of the desktop OpenJDK port (linux-port/).
 linux-port/out/
+# atlas (atl-touch) source worktree; its own git repo, see linux-port/README.md.
+linux-port/atlas/
 # Gradle kotlin-dsl scratch dir (buildSrc); not a build product path we control.
 .kotlin/

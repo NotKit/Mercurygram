@@ -45,7 +45,9 @@ linux-port/launcher/main.c
 
 | Path | Contents |
 | --- | --- |
-| `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_BUILDDIR`, `JAVA_HOME`, `PORT_OUT`); source it, don't run it |
+| `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `PORT_OUT`); source it, don't run it |
+| `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on branch `mercurygram/openjdk-port`, gitignored here |
+| `build-atlas.sh` | builds atlas from `atlas/` into `out/atlas-build/`, installs `out/atlas/` |
 | `check-env.sh` | toolchain smoke test; exits 0 when the environment is usable |
 | `native/` | glibc builds of the JNI deps (boringssl, ffmpeg, dav1d, libvpx) and of `libtmessages.so` |
 | `gradle/` | Gradle glue applied only under `-PlinuxPort` (the `jarForLinuxPort` task) |
@@ -62,8 +64,10 @@ linux-port/launcher/main.c
   otherwise. Newer JDKs are deliberately not used: the toolchain is pinned so
   every build step sees the same runtime.
 - Host toolchain: `cc`, `c++`, `cmake`, `make`, `ninja`, `pkg-config`, `unzip`.
-- An atlas checkout at `ATLAS_DIR` (default `/home/nekit/UT/atlas`), consumed
-  read-only. Meson/ninja are needed only if `ATLAS_BUILDDIR` has to be built.
+- An atlas checkout at `linux-port/atlas` (see below) plus `meson`, `ninja`, and
+  `gn` + `clang` for its skia subproject: the port builds atlas itself, it is not
+  a prebuilt dependency. atlas's own dependencies (`art-standalone`, GTK4, GLFW,
+  the AOSP support libraries in `/usr/local/lib/art`) must already be installed.
 - A Wayland or X11 session for the run steps. `ATL_GLFW_PLATFORM` forces the
   GLFW backend; `ATL_NO_GPU=1` falls back to CPU raster.
 
@@ -74,8 +78,8 @@ source linux-port/env.sh     # environment for any manual step
 linux-port/check-env.sh      # verify the toolchain first
 ```
 
-Build and run entry points (`get-atlas-artifacts.sh`, `build-all.sh`, `run.sh`)
-are added by the later stories and documented here as they land.
+Build and run entry points (`build-all.sh`, `run.sh`) are added by the later
+stories and documented here as they land.
 
 ### Native dependencies
 
@@ -186,3 +190,93 @@ atlas framework jar supplies.
 writes a dummy one when it is missing. Export `APP_ID`/`APP_HASH` and re-run
 before attempting login. `MG_BUILD_TAG` defaults to `$APP_VERSION_NAME.1` from
 `gradle.properties` and can be overridden in the environment.
+
+### atlas source checkout
+
+atlas is a **source** dependency: `linux-port/atlas/` is a checkout of
+[atl-touch](https://github.com/NotKit/atl-touch) on branch
+`mercurygram/openjdk-port`, its own git repository, gitignored by this one. The
+port builds it and may change it; framework fixes are commits on that branch,
+written so they can go upstream to atl-touch.
+
+On this machine it is a worktree of the existing clone, which is how to recreate
+it:
+
+```sh
+git -C /home/nekit/UT/atlas worktree add \
+    /home/nekit/UT/mercurygram-src/linux-port/atlas -b mercurygram/openjdk-port
+ln -s /home/nekit/UT/atlas/subprojects/skia linux-port/atlas/subprojects/skia
+```
+
+On a machine without that clone, `git clone -b mercurygram/openjdk-port
+git@github.com:NotKit/atl-touch.git linux-port/atlas` is equivalent; skia is then
+downloaded by meson (`subprojects/skia`, ~8 GB — share an existing tree by
+symlink whenever possible). `ATLAS_SKIA_DIR` points at the tree to share and
+`build-atlas.sh` creates the symlink when `subprojects/skia` is missing. Because
+a symlinked subproject does not match atlas's `/skia/` ignore rule, the symlink
+is excluded through the atlas clone's `.git/info/exclude` so both trees stay
+clean.
+
+Framework work is committed in the atlas checkout, in atlas's own commit style,
+and pushed to atl-touch:
+
+```sh
+git -C linux-port/atlas commit -am "graphics: ..."
+git -C linux-port/atlas push origin mercurygram/openjdk-port
+```
+
+The commit this port needs is recorded at the end of this file. atlas's javac
+also writes generated JNI headers back into its own source tree; those belong on
+the atlas branch like any other change, so a build no longer has to be avoided
+for that reason. `build-atlas.sh` fails if the build changes anything else in the
+checkout.
+
+### atlas framework build
+
+```sh
+linux-port/build-atlas.sh                # configure if needed, incremental ninja
+linux-port/build-atlas.sh --reconfigure  # re-run meson setup from scratch
+linux-port/build-atlas.sh --clean        # throw the builddir and out/atlas/ away
+```
+
+Builds `$ATLAS_DIR` (`linux-port/atlas`) in `out/atlas-build/` with the port's
+JDK 21 — meson picks the JDK for its `jni` dependency and for javac at configure
+time, and the framework must be compiled by the same runtime the port boots, so
+the script stamps the builddir with the JDK it used and reconfigures when that
+changes. Editing a framework source and re-running is the framework edit/build/run
+loop; only `out/atlas/` is a copy, and it is refreshed on every run.
+
+A full build takes ~95s (886 skia targets included), an incremental one ~4s. skia
+is rebuilt whenever the builddir is configured anew — `--clean` and
+`--reconfigure` — but its sources are never re-downloaded (see the symlink above).
+
+| Product | atlas source |
+| --- | --- |
+| `out/atlas/api-impl.jar` | `hax-stripped.jar` — the **pre-dex** framework classes |
+| `out/atlas/libtranslation_layer_main.so` | framework natives (Skia, GLFW, libandroidfw) |
+| `out/atlas/libandroid.so.0`, `libandroid.so` | NDK API surface: `AndroidBitmap_*`, `AAsset*` |
+| `out/atlas/libskia.so` | `subprojects/skia/` — `DT_NEEDED` of the above |
+| `out/atlas/libatl_webview_qt.so` | optional Qt WebEngine WebView backend |
+| `out/atlas/framework-res.apk` | framework resource table (goes on the classpath) |
+| `out/atlas/system/etc/fonts.xml` | copied for reference only, see below |
+| `out/atlas/artifacts.env`, `ARTIFACTS.md` | generated paths and provenance |
+
+The jar to put on a HotSpot classpath is **`hax-stripped.jar`**, atlas's javac
+product minus three compile-only stubs (`meson.build:274`). atlas's own
+`api-impl.jar` is that jar after `dx --dex` and contains only a `classes.dex`;
+the script fails if it ever ends up installing it. `out/atlas/` doubles as the
+natives dir (`java.library.path`): the installed
+`libtranslation_layer_main.so` keeps its `$ORIGIN/` RUNPATH, so `libskia.so` and
+`libandroid.so.0` resolve from the same flat directory, and the AOSP support
+libraries (`libandroidfw`, `liblog`, `libbase`, …) from `/usr/local/lib/art`.
+
+`fonts.xml` is not read on this path: atlas resolves fonts through Skia's
+fontconfig `SkFontMgr`, and the only consumer of `/system/etc/fonts.xml` is the
+path-override table in atlas's own executable, which belongs to the bionic shim
+the port does not use.
+
+Verification: `unzip -l` for `android/view/View.class`, `android/os/Looper.class`
+and the absence of `classes.dex`, `javap` for the class file version, `ldd` and
+`nm -D` on the installed libraries, and — once `build-classpath.sh` has run — a
+`PortClassCheck` that resolves `ApplicationLoader`/`LaunchActivity`, the classes
+the app class path could not load without this jar.

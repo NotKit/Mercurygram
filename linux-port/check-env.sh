@@ -24,19 +24,30 @@ libjvm="$JAVA_HOME/lib/server/libjvm.so"
 ok "libjvm: $libjvm"
 
 # --- atlas checkout ---------------------------------------------------------
-[ -f "$ATLAS_DIR/meson.build" ] || fail "ATLAS_DIR=$ATLAS_DIR is not an atlas checkout"
-ok "atlas: $ATLAS_DIR"
-if [ -d "$ATLAS_BUILDDIR" ]; then
+[ -f "$ATLAS_DIR/meson.build" ] || fail "ATLAS_DIR=$ATLAS_DIR is not an atlas checkout (see README.md)"
+atlas_branch="$(git -C "$ATLAS_DIR" branch --show-current 2>/dev/null || true)"
+[ -n "$atlas_branch" ] || fail "$ATLAS_DIR is not a git checkout"
+ok "atlas: $ATLAS_DIR on $atlas_branch ($(git -C "$ATLAS_DIR" rev-parse --short HEAD))"
+[ "$atlas_branch" = mercurygram/openjdk-port ] ||
+	echo "note: atlas is on '$atlas_branch', the port's branch is mercurygram/openjdk-port"
+
+# skia is shared between checkouts; building it from scratch is the one long step.
+[ -f "$ATLAS_DIR/subprojects/skia/BUILD.gn" ] ||
+	fail "no skia sources at $ATLAS_DIR/subprojects/skia (symlink ATLAS_SKIA_DIR=$ATLAS_SKIA_DIR there)"
+ok "atlas skia: $(readlink -f "$ATLAS_DIR/subprojects/skia")"
+
+if [ -f "$ATLAS_BUILDDIR/build.ninja" ]; then
 	ok "atlas builddir: $ATLAS_BUILDDIR"
 else
-	echo "note: $ATLAS_BUILDDIR not built yet (linux-port/get-atlas-artifacts.sh builds it)"
+	echo "note: $ATLAS_BUILDDIR not configured yet (linux-port/build-atlas.sh does it)"
 fi
 
 # --- host build tools -------------------------------------------------------
-for tool in cc c++ cmake make pkg-config unzip; do
+# meson/ninja build atlas; gn + clang build its skia subproject.
+for tool in cc c++ cmake make pkg-config unzip meson ninja gn clang clang++; do
 	command -v "$tool" >/dev/null || fail "missing host tool: $tool"
 done
-ok "host tools: cc c++ cmake make pkg-config unzip"
+ok "host tools: cc c++ cmake make pkg-config unzip meson ninja gn clang clang++"
 
 # --- workspace layout -------------------------------------------------------
 for d in native launcher shim; do
