@@ -66,3 +66,18 @@
   Never delete or re-download it; `--clean` means the builddir, not the sources.
 - Record every deviation from the Android build in `BRINGUP_NOTES.md` as it is
   found; that file is the memory between sessions.
+- The compat shim (`shim/`, built by `build-shim.sh`) may only contain classes
+  ART's boot classpath has and the JDK lacks: `libcore.*`, `dalvik.*`,
+  `android.system.*`, `android.icu.*`, `org.xmlpull.*`, `org.kxml2.*`. It compiles
+  against the JDK alone — never against api-impl. A framework bug or an ART
+  assumption inside atlas gets fixed in `$ATLAS_DIR` instead, and listed in
+  `shim/README.md` under "Fixed in atlas".
+- Nothing can be shimmed into `java.*`. If api-impl calls a method only libcore
+  adds to a JDK class, the fix is in atlas's compilation, and
+  `tools/JdkRefCheck.java` (run by `build-shim.sh`) catches it at build time.
+- Before adding a shim class, run `shim/audit-shim.sh`: it lists what is
+  unresolved and who references it. Implement what a reachable caller demands,
+  record the rest under "Deferred" with its referrers.
+- Shim classes carry approximations (ICU patterns, plural rules, likely
+  subtags). Say so in the class javadoc *and* in `shim/README.md`, so nobody
+  later mistakes them for the real ICU behaviour.

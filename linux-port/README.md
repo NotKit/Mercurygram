@@ -54,7 +54,8 @@ linux-port/launcher/main.c
 | `tools/` | small Java helpers used to verify the port's own artifacts |
 | `build-classpath.sh` | builds the HotSpot classpath and the APK from the Android sources |
 | `launcher/` | the HotSpot launcher that replaces atlas's ART `main.c` |
-| `shim/` | javac-built jar with the libcore/dalvik classes HotSpot has no equivalent for |
+| `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
+| `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
 
 ## Prerequisites
@@ -280,3 +281,38 @@ and the absence of `classes.dex`, `javap` for the class file version, `ldd` and
 `nm -D` on the installed libraries, and — once `build-classpath.sh` has run — a
 `PortClassCheck` that resolves `ApplicationLoader`/`LaunchActivity`, the classes
 the app class path could not load without this jar.
+
+### libcore/dalvik compat shim
+
+```sh
+linux-port/build-shim.sh            # jar + JNI back end + checks
+linux-port/build-shim.sh --clean
+linux-port/shim/audit-shim.sh       # what is still unresolved, and who needs it
+```
+
+Products: `out/shim.jar` (28 classes, `javac --release 21`) and
+`out/libportshim.so`, the small JNI back end for the things that cannot be done
+in Java — calling a registered free function for
+`libcore.util.NativeAllocationRegistry`, and the file-descriptor syscalls behind
+`android.system.Os`. Both go on the launcher's classpath and
+`java.library.path`; `-Dport.shim.native.path=` overrides the library path.
+
+`shim/README.md` is the audit note: every class, who demanded it, what is exact
+and what is approximate, what was deliberately deferred (chiefly `org.json`),
+and what was fixed in atlas instead of shimmed.
+
+Two things the launcher has to carry because of the shim:
+
+- `--add-opens java.base/java.io=ALL-UNNAMED`, so atlas's
+  `android.atl.FileDescriptorUtils` can reach `FileDescriptor.fd` — libcore's
+  `getInt$`/`setInt$` do not exist on a JDK.
+- `out/shim.jar` **before** the app jars on the classpath, and `out/` on
+  `java.library.path`.
+
+Verification, all inside `build-shim.sh`: the jar and the `.so` must contain the
+expected entries and symbols; `tools/JdkRefCheck.java` fails the build if
+api-impl refers to any `java.*` member this JDK lacks (libcore adds several, and
+no shim can supply them); `tools/ShimCheck.java` then runs api-impl code —
+`Rect`, `TextUtils`, `SpannableStringBuilder`, `ArrayMap`, `AndroidBidi`,
+`Process`, `Xml.newPullParser()`, `DateFormat`, `StatFs` — and checks the
+answers, including that a `Cleaner` really calls the native free function.

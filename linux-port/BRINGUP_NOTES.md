@@ -245,3 +245,51 @@ One entry per problem: symptom → cause → where it is handled.
   `/usr/local/lib/java/core-all_classes.jar` — useful for the shim: `javap` against
   it shows what a framework class could legally have been compiled against, and
   the difference from HotSpot's `java.base` is exactly what the shim jar covers.
+
+## Libcore/dalvik compat shim
+
+- **libcore adds methods to `java.*`, and that is not shimmable.** api-impl was
+  compiled with core-all as the *boot* classpath, so javac bound libcore-only
+  overloads: `System.arraycopy(char[], int, char[], int, int)` (and byte/int/
+  long/float/boolean siblings), `FileDescriptor.getInt$`/`setInt$`,
+  `Socket.getFileDescriptor$`, `LinkedHashMap.eldest()`,
+  `Thread.{get,set}UncaughtExceptionPreHandler`. Every one throws
+  `NoSuchMethodError` on HotSpot — `ArrayMap.put` and `SpannableStringBuilder`
+  died on the first call — and no classpath jar can fix it, because `java.*`
+  belongs to the JDK. Fixed in atlas by compiling with `--release 8` and core-all
+  on the *class* path (12 compile errors, 5 files); `build-shim.sh` now fails if
+  such a reference reappears.
+- **`--add-opens java.base/java.io=ALL-UNNAMED` is required from the launcher on.**
+  atlas's replacement for `FileDescriptor.getInt$` reads the private `fd` field
+  reflectively when the runtime has no libcore.
+- **Framework "compiled against ART libcore" cuts both ways.** Constants that
+  libcore fills in natively (`OsConstants.O_CLOEXEC`, `XmlPullParser.START_TAG`,
+  ICU's `Bidi.LEVEL_DEFAULT_LTR`) are *not* inlined into api-impl when they are
+  assigned in a static block, but they *are* inlined when they are compile-time
+  constants. The shim has to reproduce the real values either way — check with
+  `javap -constants` against `/usr/local/lib/java/core-all_classes.jar` before
+  inventing one.
+- **`android.util.Xml` needs a real pull parser**, not just the interfaces:
+  `XmlBlock$Parser` (binary resources) only implements `XmlPullParser`, but
+  `Xml.newPullParser()` instantiates `org.kxml2.io.KXmlParser` by name through
+  `XmlPullParserFactory`. The shim's `KXmlParser` is a StAX bridge; the factory
+  skips class names it cannot load, so the missing `KXmlSerializer` does not
+  break parsing.
+- **`ATLTimeZone` was an ART workaround.** It built an Android tzdata blob for
+  `libcore.util.ZoneInfoDB` because ART returns GMT without one; on a JDK
+  `TimeZone.getTimeZone(id)` already works. Fixed in atlas (ask the runtime
+  first), which removed four libcore classes from the shim's list.
+- **`org.json` is the largest remaining gap** (81 app classes, `ApplicationLoader`
+  and `SharedConfig` among them). Android has it on the boot classpath; the JDK
+  does not, and no dependency jar in `out/classpath/` carries it. Deferred
+  deliberately — it is a JSON library, not a runtime shim.
+- **What the JDK cannot approximate:** relative-time wording
+  (`android.icu.text.RelativeDateTimeFormatter` is English-only here), CLDR
+  skeleton patterns (`ICU.getBestDateTimePattern`), plural rules beyond
+  one/other plus the Slavic family, and likely-subtags. All are localisation
+  quality, not correctness — but they are visible in the UI.
+- **`NativeAllocationRegistry` needs JNI**, not `java.lang.foreign`: the FFM API
+  is still preview in JDK 21, so a 10-line `applyFreeFunction` in
+  `libportshim.so` is the cheaper answer. `libcore.io.Posix` also uses JNI to
+  read `FileDescriptor.fd`, because JNI ignores access control and needs no
+  `--add-opens`.
