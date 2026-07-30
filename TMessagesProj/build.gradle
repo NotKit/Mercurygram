@@ -102,6 +102,12 @@ def detectSingleFdAbi() {
 }
 def singleFdAbi = detectSingleFdAbi()
 
+// [MG] -PlinuxPort builds only what the desktop OpenJDK port needs (javac output,
+// resources, assets). The port links its own glibc libtmessages.so from
+// linux-port/native/, so the NDK build and its debug-symbol steps are skipped —
+// that also keeps the jni/ submodules undirtied. See linux-port/README.md.
+def linuxPort = project.hasProperty('linuxPort')
+
 def isWindows = String.valueOf(DefaultNativePlatform.currentOperatingSystem.toFamilyName() == OperatingSystemFamily.WINDOWS)
 android {
     compileSdkVersion 35
@@ -114,9 +120,11 @@ android {
     // CI runner's disk. The packaged .so come from externalNativeBuild (cmake/*/obj/<abi>).
     sourceSets.main.jniLibs.srcDirs = []
 
-    externalNativeBuild {
-        cmake {
-            path 'jni/CMakeLists.txt'
+    if (!linuxPort) {
+        externalNativeBuild {
+            cmake {
+                path 'jni/CMakeLists.txt'
+            }
         }
     }
 
@@ -149,14 +157,16 @@ android {
         // Limit CMake to a single ABI for per-ABI F-Droid builds; has no effect otherwise.
         if (singleFdAbi) ndk.abiFilters singleFdAbi
 
-        externalNativeBuild {
-            cmake {
-                version '3.10.2'
-                def cmakeArgs = ['-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-24'] //, '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
-                if (getProps('QUIET_NATIVE_BUILD')) {
-                    cmakeArgs += '-DQUIET_BUILD=ON'
+        if (!linuxPort) {
+            externalNativeBuild {
+                cmake {
+                    version '3.10.2'
+                    def cmakeArgs = ['-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-24'] //, '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                    if (getProps('QUIET_NATIVE_BUILD')) {
+                        cmakeArgs += '-DQUIET_BUILD=ON'
+                    }
+                    arguments(*cmakeArgs)
                 }
-                arguments(*cmakeArgs)
             }
         }
 

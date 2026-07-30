@@ -3,6 +3,10 @@ apply plugin: 'com.android.application'
 // Derive rootProject.ext.MG_VERSION_NAME / MG_VERSION_CODE from MG_BUILD_TAG.
 apply from: "$rootDir/gradle/mg-version.gradle"
 
+// [MG] -PlinuxPort: see the matching flag in TMessagesProj/build.gradle. No NDK
+// build runs, so there are no .so to merge and no ordering to enforce.
+def linuxPort = project.hasProperty('linuxPort')
+
 // Wire each variant's merge*JniLibFolders task to run after all per-ABI native build
 // tasks that are scheduled. jniLibs.srcDirs points to jni/ but contributes no .so files
 // (no ABI-named subdirs exist there); mustRunAfter is sufficient to prevent the race
@@ -10,7 +14,7 @@ apply from: "$rootDir/gradle/mg-version.gradle"
 // the merge task walks the tree. Native builds are scheduled by CMake task dependencies
 // (already per-ABI aware), so this ordering does not force unneeded ABIs to build.
 afterEvaluate {
-    def nativeTasks = ['buildNativeLibsArm64', 'buildNativeLibsArm32',
+    def nativeTasks = linuxPort ? [] : ['buildNativeLibsArm64', 'buildNativeLibsArm32',
                        'buildNativeLibsX86_64', 'buildNativeLibsX86']
     tasks.matching { it.name.matches('merge.*JniLibFolders') }.configureEach { mergeTask ->
         nativeTasks.each { taskName ->
@@ -57,7 +61,7 @@ android {
         includeInBundle = false
     }
 
-    sourceSets.main.jniLibs.srcDirs = ['../TMessagesProj/jni/']
+    sourceSets.main.jniLibs.srcDirs = linuxPort ? [] : ['../TMessagesProj/jni/']
 
     aaptOptions {
         cruncherEnabled = false
@@ -300,10 +304,12 @@ android {
 
         vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
 
-        externalNativeBuild {
-            cmake {
-                version '3.10.2'
-                arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-24' // , '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+        if (!linuxPort) {
+            externalNativeBuild {
+                cmake {
+                    version '3.10.2'
+                    arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-24' // , '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                }
             }
         }
     }

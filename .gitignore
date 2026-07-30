@@ -22,3 +22,7 @@ TMessagesProj_AppStandalone/afat/
 TMessagesProj_AppHuawei/afat/
 API_KEYS
 .env
+# Build products of the desktop OpenJDK port (linux-port/).
+linux-port/out/
+# Gradle kotlin-dsl scratch dir (buildSrc); not a build product path we control.
+.kotlin/
