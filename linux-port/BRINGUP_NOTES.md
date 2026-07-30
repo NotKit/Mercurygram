@@ -293,3 +293,55 @@ One entry per problem: symptom → cause → where it is handled.
   `libportshim.so` is the cheaper answer. `libcore.io.Posix` also uses JNI to
   read `FileDescriptor.fd`, because JNI ignores access control and needs no
   `--add-opens`.
+
+## HotSpot launcher
+
+- **The launcher had to move into atlas**, and the reason is a link-graph one,
+  not a taste one: `libtranslation_layer_main.so` *imports* `apk_path`,
+  `atl_window`, `get_app_data_dir` and seven `bionic_*` functions from whatever
+  executable loads it. It is now atlas's `android-translation-layer-hotspot`
+  meson target (`src/main-executable-hotspot/`, atlas commit *add a launcher for
+  running apps on a stock JVM*); `linux-port/launcher/README.md` has the full
+  decision and the ART-vs-HotSpot differences. `build-atlas.sh` fails the build
+  if the launcher stops defining one of those imported symbols.
+- **`JNI_CreateJavaVM` does not expand `dir/*` in `java.class.path`.** Only the
+  `java` command does, before the VM starts. Passing the port's
+  `out/classpath/*` straight through put a directory literally named `*` on the
+  class path, and every one of the 90 dependency jars was missing —
+  `ClassNotFoundException: androidx.core.content.FileProvider` with an
+  `AppClassLoader` frame in the stack, which reads like a classpath typo rather
+  than a wildcard problem. The launcher expands it itself now.
+- **`System.load` from JNI loads into the wrong class loader.** It binds the
+  library to its *calling class*'s loader, and JNI method lookup only searches
+  the loader of the class declaring the native method. Called straight from the
+  launcher there is no Java caller at all, so the library lands on the boot
+  loader and no `Java_android_*` entry point resolves. ART's two-argument
+  `Runtime.loadLibrary(String, ClassLoader)` has no JVM equivalent, so atlas
+  gained `android.atl.ATLRuntime.loadNativeLibrary` and the launcher calls that.
+- **First crash on the boot path: `TypedArray` used ART's pinned arrays.** It
+  allocated `mData`/`mIndices` with `VMRuntime.newNonMovableArray` and passed
+  `VMRuntime.addressOf()` of each into `applyStyle`/`retrieveAttributes`.
+  Nothing outside ART can pin an array, so the shim's `addressOf` returns 0 and
+  libandroidfw's `RetrieveAttributes` dereferenced it — SIGSEGV during
+  `android.content.Context.<clinit>`, the manifest parse, before any app code
+  ran. Fixed in atlas by passing the `int[]` and letting JNI hand out the
+  pointers (commit *api-impl: hand the attribute buffers to JNI instead of raw
+  addresses*). Watch for the same pattern elsewhere: `addressOf` is the tell.
+- **Editing a Java signature that has a native peer needs two ninja passes.**
+  javac writes `src/api-impl-jni/generated_headers/*.h`, but nothing in atlas's
+  meson graph makes the `.so` depend on them, so the first build compiles the C
+  against the stale header and fails with "conflicting types". Re-run; the
+  regenerated header is a normal commit on the atlas branch.
+- **`-rdynamic` and `$ORIGIN`, not the JDK, in the launcher's RUNPATH.**
+  `-rdynamic` is what lets the library resolve the symbols above from the
+  executable. `libjvm.so` is deliberately *not* in the RUNPATH (it would pin the
+  binary to one JDK install); every run script exports
+  `LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT` instead.
+- **Where the full boot starts.** With the smoke test green, a full boot gets through
+  the manifest parse, the content providers and the window, then dies on
+  `NoClassDefFoundError: libcore/util/ZoneInfo` in `Context.createApplication`
+  (the shim dropped `ZoneInfo` when `ATLTimeZone` stopped needing it
+  — `Context` still does) and on
+  `ClassNotFoundException: android.window.OnBackInvokedCallback`, one of the
+  three stubs `hax-stripped.jar` drops on the assumption that the app's androidx
+  brings its own. Both are full-boot work; the log is kept as `out/full-boot.log`.

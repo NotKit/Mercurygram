@@ -54,6 +54,7 @@ artifacts=(
 	"libandroid.so.0|libandroid.so.0|libandroid.so.0|yes"
 	"subprojects/skia/libskia.so|libskia.so|subprojects/skia/libskia.so|yes"
 	"res/framework-res/framework-res.apk|framework-res.apk|res/framework-res/framework-res.apk|yes"
+	"android-translation-layer-hotspot|android-translation-layer-hotspot|android-translation-layer-hotspot|yes"
 	"libatl_webview_qt.so|libatl_webview_qt.so|libatl_webview_qt.so|no"
 )
 
@@ -180,6 +181,27 @@ for sym in AndroidBitmap_lockPixels AAssetManager_open; do
 	grep -q " T $sym\$" <<<"$android_syms" || {
 		echo "libandroid.so.0 does not export $sym" >&2; exit 1; }
 done
+
+# The launcher is the other half of libtranslation_layer_main.so's link graph:
+# the library imports these from whatever executable loads it, so a missing one
+# is not a link error, it is a crash at startup.
+launcher="$ATLAS_OUT/android-translation-layer-hotspot"
+launcher_syms=$(nm -D --defined-only "$launcher")
+tl_undef=$(nm -D --undefined-only "$ATLAS_OUT/libtranslation_layer_main.so" | awk '{print $2}')
+for sym in apk_path atl_window get_app_data_dir bionic_dlopen bionic_dlsym \
+	bionic_eglCreateWindowSurface bionic_eglDestroySurface bionic_eglGetDisplay \
+	bionic_eglMakeCurrent bionic_eglSwapBuffers bionic_glBindFramebuffer
+do
+	grep -qx "$sym" <<<"$tl_undef" || continue
+	grep -qE " [BTD] $sym\$" <<<"$launcher_syms" || {
+		echo "libtranslation_layer_main.so imports $sym, but the launcher does not define it" >&2
+		exit 1; }
+done
+
+# everything but libjvm.so, which the run scripts add to LD_LIBRARY_PATH
+launcher_ldd=$(cd "$ATLAS_OUT" && ldd android-translation-layer-hotspot || true)
+missing=$(grep "not found" <<<"$launcher_ldd" | grep -v libjvm || true)
+[ -z "$missing" ] || { echo "unresolved launcher dependencies:" >&2; echo "$missing" >&2; exit 1; }
 
 res_listing=$(unzip -l "$ATLAS_OUT/framework-res.apk")
 grep -q "resources.arsc" <<<"$res_listing" || {

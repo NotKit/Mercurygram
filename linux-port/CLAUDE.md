@@ -75,6 +75,22 @@
 - Nothing can be shimmed into `java.*`. If api-impl calls a method only libcore
   adds to a JDK class, the fix is in atlas's compilation, and
   `tools/JdkRefCheck.java` (run by `build-shim.sh`) catches it at build time.
+- The launcher is an atlas meson target (`$ATLAS_DIR/src/main-executable-hotspot/`,
+  `android-translation-layer-hotspot`), built and installed by `build-atlas.sh`;
+  `launcher/` here holds only the decision note and `smoke-test.sh`. Edit the
+  launcher in atlas and commit it there. Reason in `launcher/README.md`:
+  `libtranslation_layer_main.so` *imports* `apk_path`, `atl_window`,
+  `get_app_data_dir` and the `bionic_*` calls from its executable.
+- Changing a Java signature that has a native peer in atlas needs two ninja
+  passes: javac regenerates `src/api-impl-jni/generated_headers/*.h`, but the
+  `.so` does not depend on them, so the first build compiles against the stale
+  header. Re-run, then commit the header on the atlas branch.
+- Anything running the launcher needs
+  `LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT` — `libjvm.so` is
+  deliberately not in its RUNPATH.
+- `JNI_CreateJavaVM` is not the `java` command: it does not expand `dir/*` in
+  `java.class.path`, and `System.load` called from JNI binds to the boot class
+  loader. The launcher handles both; don't reintroduce either assumption.
 - Before adding a shim class, run `shim/audit-shim.sh`: it lists what is
   unresolved and who references it. Implement what a reachable caller demands,
   record the rest under "Deferred" with its referrers.

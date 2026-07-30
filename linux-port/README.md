@@ -12,18 +12,23 @@ Bring-up workarounds and crash notes: `BRINGUP_NOTES.md`.
 
 ## Boot architecture
 
-`launcher/main.c` replaces atlas's `src/main-executable/main.c`: it links
-`libjvm.so` from the JDK and boots HotSpot through the JNI invocation API
-instead of ART. It sets the system properties atlas reads (SDK_INT, app id, data
-dir, apk path), builds the classpath from atlas's pre-dex `api-impl.jar` plus the
-compat `shim.jar` plus the app jars, then drives atlas's normal startup sequence
-(`Context.createApplication` → `ContentProvider.createContentProviders` →
-`Activity.createMainActivity`) and enters the GLib main loop. Resources and
-assets still come from the built APK through atlas's libandroidfw path, so only
-*code* loading changes.
+`android-translation-layer-hotspot` replaces atlas's ART launcher
+`android-translation-layer`: it links `libjvm.so` from the JDK and boots HotSpot
+through the JNI invocation API instead of ART. It sets the system properties
+atlas reads (SDK_INT, app id, data dir, apk path), builds the classpath from
+atlas's pre-dex `api-impl.jar` plus the compat `shim.jar` plus the app jars, then
+drives atlas's normal startup sequence (`Context.createApplication` →
+`ContentProvider.createContentProviders` → `Activity.createMainActivity`) and
+enters the GLib main loop. Resources and assets still come from the built APK
+through atlas's libandroidfw path, so only *code* loading changes.
+
+It is a meson target **inside atlas** (`src/main-executable-hotspot/`) rather
+than a program in this repo, because `libtranslation_layer_main.so` imports
+symbols from whatever executable loads it — see `launcher/README.md` for the
+decision and the full ART-vs-HotSpot difference table.
 
 ```
-linux-port/launcher/main.c
+atlas android-translation-layer-hotspot
         |  JNI_CreateJavaVM
         v
    libjvm.so  (OpenJDK 21 HotSpot)
@@ -53,7 +58,7 @@ linux-port/launcher/main.c
 | `gradle/` | Gradle glue applied only under `-PlinuxPort` (the `jarForLinuxPort` task) |
 | `tools/` | small Java helpers used to verify the port's own artifacts |
 | `build-classpath.sh` | builds the HotSpot classpath and the APK from the Android sources |
-| `launcher/` | the HotSpot launcher that replaces atlas's ART `main.c` |
+| `launcher/` | why the HotSpot launcher lives in atlas, and the smoke test that boots it |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -281,6 +286,41 @@ and the absence of `classes.dex`, `javap` for the class file version, `ldd` and
 `nm -D` on the installed libraries, and — once `build-classpath.sh` has run — a
 `PortClassCheck` that resolves `ApplicationLoader`/`LaunchActivity`, the classes
 the app class path could not load without this jar.
+
+### HotSpot launcher
+
+```sh
+linux-port/build-atlas.sh            # builds and installs the launcher too
+linux-port/launcher/smoke-test.sh    # -> out/run.log, out/screenshots/
+```
+
+The launcher is atlas's `android-translation-layer-hotspot` target, installed to
+`out/atlas/` alongside the framework libraries. `launcher/README.md` explains why
+it lives in atlas, what it does differently from the ART launcher, and which
+parts of that launcher are deliberately gone (bionic linker, path overrides, apk
+native-library extraction).
+
+```sh
+LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT" \
+out/atlas/android-translation-layer-hotspot \
+    --api-impl-jar out/atlas/api-impl.jar \
+    --framework-res out/atlas/framework-res.apk \
+    --natives-dir out/atlas \
+    --classpath "out/shim.jar:out/classpath/*" \
+    --library-path out \
+    out/app.apk
+```
+
+`--smoke-test N` boots the VM and the window but creates no application, which
+is what `smoke-test.sh` uses: it asserts the JVM starts, the translation layer
+loads into the class loader that owns the framework, one of its
+`Java_android_*` entry points resolves, the window has a non-zero size, and the
+process exits 0 — without depending on any Mercurygram code. It starts an `Xvfb`
+when the session has no display.
+
+`build-atlas.sh` checks the other half of the contract: every symbol
+`libtranslation_layer_main.so` imports from its executable must be defined by
+the installed launcher.
 
 ### libcore/dalvik compat shim
 

@@ -28,3 +28,8 @@ linux-port/out/
 linux-port/atlas/
 # Gradle kotlin-dsl scratch dir (buildSrc); not a build product path we control.
 .kotlin/
+
+# JVM crash reports from linux-port bring-up runs
+hs_err_pid*.log
+replay_pid*.log
+core.[0-9]*
