@@ -15,6 +15,7 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+source "$PORT_DIR/launcher/display.sh"
 
 seconds="${1:-5}"
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
@@ -49,42 +50,16 @@ run_launcher() {
 		"$PORT_OUT/app.apk"
 }
 
-screenshot() {
-	if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v grim >/dev/null; then
-		grim "$shots/launcher-smoke.png" && return 0
-	elif [ -n "${DISPLAY:-}" ] && command -v import >/dev/null; then
-		import -window root "$shots/launcher-smoke.png" && return 0
-	fi
-	echo "note: no screenshot tool for this session, skipping the screenshot"
-	return 0
-}
-
 # A session of our own when there is none: the point is the window, so a
 # headless run still has to have somewhere to put it.
-xvfb_pid=""
-if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
-	command -v Xvfb >/dev/null || { echo "no display and no Xvfb to make one" >&2; exit 1; }
-	for display in $(seq 90 99); do
-		Xvfb ":$display" -screen 0 960x540x24 >/dev/null 2>&1 &
-		xvfb_pid=$!
-		sleep 1
-		if kill -0 "$xvfb_pid" 2>/dev/null; then
-			export DISPLAY=":$display"
-			break
-		fi
-		xvfb_pid=""
-	done
-	[ -n "$xvfb_pid" ] || { echo "could not start Xvfb" >&2; exit 1; }
-	trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
-	echo "started Xvfb on $DISPLAY"
-fi
+port_start_display
 
 echo "running the launcher for ${seconds}s, log in $log"
 status=0
 run_launcher >"$log" 2>&1 &
 launcher_pid=$!
 sleep $((seconds > 2 ? seconds - 2 : 1))
-screenshot
+port_screenshot "$shots/launcher-smoke.png"
 wait "$launcher_pid" || status=$?
 
 # --- verification -----------------------------------------------------------

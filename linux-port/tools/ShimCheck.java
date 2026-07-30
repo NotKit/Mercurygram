@@ -165,6 +165,33 @@ public class ShimCheck {
 			                         .getScript()),
 			    "ru should be Cyrl");
 		});
+		check("org.json round trip", () -> {
+			org.json.JSONObject parsed = new org.json.JSONObject(
+			    "{\"n\": 1, \"s\": \"a\\\"b\", \"f\": 1.5, \"t\": true, \"a\": [1, \"two\", null], \"o\": {\"k\": \"v\"}}");
+			expect(parsed.getInt("n") == 1 && parsed.getLong("n") == 1L, "n is not 1");
+			expect("a\"b".equals(parsed.getString("s")), "escape not decoded: " + parsed.optString("s"));
+			expect(parsed.getDouble("f") == 1.5 && parsed.getBoolean("t"), "f/t are wrong");
+			expect(parsed.getJSONArray("a").length() == 3, "array length");
+			expect("two".equals(parsed.getJSONArray("a").getString(1)), "a[1]");
+			expect(parsed.getJSONArray("a").isNull(2), "a[2] should be null");
+			expect("v".equals(parsed.getJSONObject("o").getString("k")), "nested object");
+			expect(parsed.optString("missing", "d").equals("d"), "optString fallback");
+			expect(!parsed.has("missing") && parsed.isNull("missing"), "missing key");
+
+			org.json.JSONObject built = new org.json.JSONObject();
+			built.put("s", "x\"y").put("n", 2).put("a", new org.json.JSONArray().put(1).put(2));
+			org.json.JSONObject again = new org.json.JSONObject(built.toString());
+			expect("x\"y".equals(again.getString("s")) && again.getInt("n") == 2,
+			    "did not survive toString(): " + built);
+			expect(again.getJSONArray("a").getInt(1) == 2, "array did not survive toString()");
+
+			// a type the getter cannot coerce has to throw, not return a default
+			try {
+				parsed.getJSONObject("n");
+				throw new AssertionError("getJSONObject on a number did not throw");
+			} catch (org.json.JSONException expected) {
+			}
+		});
 		check("libcore.util.NativeAllocationRegistry frees the peer", () -> {
 			long freeFunction = libcore.util.NativeAllocationRegistry.SelfTest.freeFunction();
 			long before = libcore.util.NativeAllocationRegistry.SelfTest.freeCalls();

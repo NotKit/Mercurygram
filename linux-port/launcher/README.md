@@ -66,6 +66,15 @@ linux-port/build-atlas.sh          # builds and installs the launcher
 linux-port/launcher/smoke-test.sh  # exits 0 when the runtime is up
 ```
 
+`--run-class CLASS` is the other test entry point: it runs that class's
+`main(String[])` in the app's runtime — same framework, class path and native
+libraries as a real run — instead of creating the application, then exits with
+its status. `linux-port/check-native-loader.sh` runs on it.
+
+`display.sh` holds the two things every run script here needs and nothing else:
+`port_start_display` (an `Xvfb` when the session has no display) and
+`port_screenshot`.
+
 `libjvm.so` is not on the default loader path and the launcher's RUNPATH is
 deliberately `$ORIGIN` only, so any run needs
 `LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT`.

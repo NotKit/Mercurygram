@@ -87,7 +87,14 @@
   header. Re-run, then commit the header on the atlas branch.
 - Anything running the launcher needs
   `LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT` — `libjvm.so` is
-  deliberately not in its RUNPATH.
+  deliberately not in its RUNPATH — and `source launcher/display.sh` for
+  `port_start_display`/`port_screenshot` instead of its own `Xvfb` block.
+- To run app code without a full boot, use the launcher's `--run-class CLASS`
+  with a helper in `tools/`. That is the cheapest way to test one piece of the
+  app (or of the framework) while the boot path is still incomplete.
+- Changes to `org/telegram/**` are a last resort (FR-7 allows the NativeLoader
+  hook only): make them a guarded escape hatch driven by a `-D` property, so the
+  Android build is bit-identical without it and the diff stays upstreamable.
 - `JNI_CreateJavaVM` is not the `java` command: it does not expand `dir/*` in
   `java.class.path`, and `System.load` called from JNI binds to the boot class
   loader. The launcher handles both; don't reintroduce either assumption.
@@ -97,3 +104,24 @@
 - Shim classes carry approximations (ICU patterns, plural rules, likely
   subtags). Say so in the class javadoc *and* in `shim/README.md`, so nobody
   later mistakes them for the real ICU behaviour.
+- `run.sh` is the boot loop: `./build-atlas.sh && ./run.sh --seconds 25 --fresh`,
+  then read the *first* exception in `out/run.log`. Later ones are usually the
+  wreckage of the first (an aborted `onCreate` leaves the fragment host
+  unattached, a null application object segfaults the launcher).
+- A missing framework class is not always a missing feature. Most of what the
+  boot path demanded is field types, catch clauses and API-29+ branches behind
+  `SDK_INT` checks: the class has to exist because verification (or
+  `View.overridesOnDraw`'s reflection) loads it, not because anything calls it.
+  Add an honest stub in atlas, say in the javadoc what it does not do.
+- Guarding a call to a class the runtime lacks does not stop the JVM loading it:
+  verification resolves everything the verified method names. The fix is to move
+  that code into its own class (`ATLZoneInfoDb`), not to add a check.
+- A nested class that the SDK declares `static` must be `static` in api-impl too,
+  or the app's `new Outer.Inner()` fails with `NoSuchMethodError`. Nested classes
+  inside an *interface* are already static.
+- The port installs atlas's `hax.jar`, not `hax-stripped.jar`: the stripping
+  exists for ART's duplicate-class check on dex, and nothing on the app class
+  path defines the three stubs it drops.
+- `ATL_NO_GPU=1` is on by default in `run.sh`: atlas's Ganesh path crashes in
+  skia's `GrGLExtensions::init` on any GL driver here. Don't chase it from the
+  Java side.

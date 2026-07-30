@@ -58,7 +58,9 @@ atlas android-translation-layer-hotspot
 | `gradle/` | Gradle glue applied only under `-PlinuxPort` (the `jarForLinuxPort` task) |
 | `tools/` | small Java helpers used to verify the port's own artifacts |
 | `build-classpath.sh` | builds the HotSpot classpath and the APK from the Android sources |
-| `launcher/` | why the HotSpot launcher lives in atlas, and the smoke test that boots it |
+| `launcher/` | why the HotSpot launcher lives in atlas, the smoke test that boots it, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
+| `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
+| `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -84,8 +86,8 @@ source linux-port/env.sh     # environment for any manual step
 linux-port/check-env.sh      # verify the toolchain first
 ```
 
-Build and run entry points (`build-all.sh`, `run.sh`) are added by the later
-stories and documented here as they land.
+`linux-port/run.sh` launches the app (see *Running the app* below);
+`build-all.sh`, the one-command build of everything, comes later.
 
 ### Native dependencies
 
@@ -318,9 +320,36 @@ loads into the class loader that owns the framework, one of its
 process exits 0 — without depending on any Mercurygram code. It starts an `Xvfb`
 when the session has no display.
 
+`--run-class CLASS` runs one class's `main(String[])` in the app's runtime
+instead of creating the application — the framework, the class path and the
+native libraries are those of a real run, so a single piece of the app can be
+tested without a UI. `check-native-loader.sh` (below) uses it.
+
 `build-atlas.sh` checks the other half of the contract: every symbol
 `libtranslation_layer_main.so` imports from its executable must be defined by
 the installed launcher.
+
+### Loading the glibc libtmessages.so
+
+```sh
+linux-port/check-native-loader.sh    # -> out/run.log
+```
+
+`NativeLoader.initNativeLibs` normally looks the library up with
+`System.loadLibrary` and then unpacks an Android `.so` out of the apk. On the
+desktop the library is a glibc build sitting in `out/`, so `NativeLoader` takes
+`-Dtmessages.native.path=<path>`: it `System.load`s that file and returns,
+skipping the extraction path entirely. That is the only change this port makes
+to `org/telegram/**` for native loading.
+
+`check-native-loader.sh` compiles `tools/NativeLoaderCheck.java` and runs it
+with `--run-class`. Reaching the end proves the whole chain: the property took
+effect, `JNI_OnLoad` returned a version (so `imageOnJNILoad`, `videoOnJNILoad`
+and `registerNativeTgNetFunctions` all succeeded against the atlas framework),
+tgnet's dynamically registered methods work
+(`NativeByteBuffer.native_getFreeBuffer`), a statically named entry point
+resolves by name (`NativeLoader.init`), and no library was extracted into the
+app data dir.
 
 ### libcore/dalvik compat shim
 
@@ -330,7 +359,7 @@ linux-port/build-shim.sh --clean
 linux-port/shim/audit-shim.sh       # what is still unresolved, and who needs it
 ```
 
-Products: `out/shim.jar` (28 classes, `javac --release 21`) and
+Products: `out/shim.jar` (36 classes, `javac --release 21`) and
 `out/libportshim.so`, the small JNI back end for the things that cannot be done
 in Java — calling a registered free function for
 `libcore.util.NativeAllocationRegistry`, and the file-descriptor syscalls behind
@@ -338,8 +367,9 @@ in Java — calling a registered free function for
 `java.library.path`; `-Dport.shim.native.path=` overrides the library path.
 
 `shim/README.md` is the audit note: every class, who demanded it, what is exact
-and what is approximate, what was deliberately deferred (chiefly `org.json`),
-and what was fixed in atlas instead of shimmed.
+and what is approximate, what was deferred, and what was fixed in atlas instead
+of shimmed. `org.json` moved from deferred to implemented during the boot bring-up: it is on
+the boot path, Android has it on the boot classpath and the JDK does not.
 
 Two things the launcher has to carry because of the shim:
 
@@ -356,3 +386,32 @@ no shim can supply them); `tools/ShimCheck.java` then runs api-impl code —
 `Rect`, `TextUtils`, `SpannableStringBuilder`, `ArrayMap`, `AndroidBidi`,
 `Process`, `Xml.newPullParser()`, `DateFormat`, `StatFs` — and checks the
 answers, including that a `Cleaner` really calls the native free function.
+
+### Running the app
+
+```sh
+linux-port/run.sh                     # until the window is closed
+linux-port/run.sh --seconds 60        # timed run: checks run.log, takes a screenshot
+linux-port/run.sh --fresh             # start from an empty data dir
+linux-port/run.sh --gpu               # try Ganesh again (currently crashes, see below)
+linux-port/run.sh -- --window-width 1280   # anything after -- goes to the launcher
+```
+
+The app data dir is `out/data/` (`--data-dir` to move it, `ANDROID_APP_DATA_DIR`
+is honoured too), the log is `out/run.log` and timed runs write
+`out/screenshots/run.png`. With no session, `launcher/display.sh` starts an Xvfb.
+
+A timed run is also the story's check: it requires `boot: Application.onCreate
+returned` and `boot: main activity started` in the log, no `hs_err`, and no
+uncaught exception for the whole run. That now reaches the Telegram
+intro screen ("Start Messaging") and idles cleanly for 70s.
+
+Two things to know about the run:
+
+- **CPU raster is the default.** atlas's Ganesh path segfaults inside skia's
+  `GrGLExtensions::init` while assembling the GL interface — on llvmpipe and on
+  hardware GL alike, so neither the JVM nor the headless setup is the cause.
+  `run.sh` exports `ATL_NO_GPU=1`; `--gpu` reproduces it. See `BRINGUP_NOTES.md`.
+- **`-Dtmessages.native.path`** points `NativeLoader` at
+  `out/libtmessages.so`; without it the app would try to unpack an Android `.so`
+  from the apk.

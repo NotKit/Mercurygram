@@ -345,3 +345,97 @@ One entry per problem: symptom → cause → where it is handled.
   `ClassNotFoundException: android.window.OnBackInvokedCallback`, one of the
   three stubs `hax-stripped.jar` drops on the assumption that the app's androidx
   brings its own. Both are full-boot work; the log is kept as `out/full-boot.log`.
+
+## NativeLoader hook
+
+- **The only change to `org/telegram/**` for native loading is a system
+  property.** `NativeLoader.initNativeLibs` reads
+  `-Dtmessages.native.path=<path>`, `System.load`s that file and returns before
+  any of the Android logic — the `System.loadLibrary` attempt, the local copy in
+  `files/lib/`, and the apk `lib/x86_64/` extraction, none of which can produce a
+  glibc library. A failure there is deliberately *not* caught: with the property
+  set, falling back to unpacking an Android `.so` would only turn a broken setup
+  into a confusing one.
+- **`initNativeLibs(null)` has to work.** The hook returns before the `Context`
+  is used, which is what lets the check run without an Application. Keep it
+  ahead of the `try` block for that reason.
+- **`--run-class` in the launcher is how a single piece of app code gets
+  tested.** It runs one class's `main()` in the app's runtime instead of
+  `Context.createApplication`, so `NativeLoader` could be proven before the full boot
+  makes a full boot work (atlas commit *hotspot launcher: add --run-class*).
+- **`JNI_OnLoad` needs the framework, not just the class path.** It ends up in
+  `imageOnJNILoad`, which requires `android.graphics.BitmapFactory$Options` and
+  its `inJustDecodeBounds`/`outWidth`/`outHeight` fields, and in
+  `registerNativeTgNetFunctions`, which looks up a few dozen `ConnectionsManager`
+  callbacks. atlas's framework satisfied all of them first try; if one ever
+  disappears, `System.load` fails with "JNI_OnLoad returned bad version" and the
+  real cause is a `FindClass`/`GetFieldID` that returned 0.
+- **Both JNI lookup paths are worth checking, they can fail separately.**
+  Statically named `Java_org_telegram_*` symbols are resolved by the JVM on first
+  call in the loader that did the `System.load`; tgnet's methods are registered
+  by `RegisterNatives` from `JNI_OnLoad` instead. `NativeLoaderCheck` exercises
+  one of each.
+
+## Boot to the intro screen
+
+Ten crashes between "the window appears" and the intro screen. Each one is
+symptom → fix; atlas commits are on `mercurygram/openjdk-port`.
+
+- **`NoClassDefFoundError: libcore/util/ZoneInfo` in `Context.createApplication`
+  → atlas *atl: keep libcore out of ATLTimeZone until it is needed*.** The shim
+  made `ATLTimeZone` ask the runtime first, which is not enough: the JVM loads
+  every class named in the callees it verifies, so `ZoneInfo`,
+  `MemoryMappedFile` and `ZoneInfoDB` came in through a fallback that never
+  runs. Splitting them into `ATLZoneInfoDb` is the fix. **The general rule:
+  guarding a call is not enough, the class it names has to move.**
+- **`ClassNotFoundException: android.window.OnBackInvokedCallback` → the port
+  installs `hax.jar`, not `hax-stripped.jar` (`build-atlas.sh`).** The stripped
+  jar exists because ART rejects an app's oat file when a class is defined in
+  both the framework and the app's dex. A JVM class path has no such check, and
+  nothing in `out/classpath/` defines the three dropped stubs — checked, not
+  assumed. `build-atlas.sh` now fails if the installed jar lacks them.
+- **`NoSuchMethodError: OvershootInterpolator.<init>()`, and
+  `StrictMode$VmPolicy$Builder.<init>(VmPolicy)` from `LaunchActivity.onCreate`
+  → atlas *api-impl: add the constructors apps call*.** The second one aborted
+  `onCreate` halfway, which is what produced the flood of
+  "FragmentManager has not been attached to a host" afterwards. **Read the first
+  exception, not the loudest.**
+- **`NoSuchMethodError: ConnectivityManager$NetworkCallback.<init>()` and
+  `NetworkRequest$Builder.<init>()` → atlas *api-impl: make the nested classes
+  apps instantiate static*.** Inner classes where the SDK has static ones: the
+  app's bytecode calls a no-arg constructor that does not exist. Worth grepping
+  for more (`grep -n '^\tpublic class ' api-impl/**`) — most of the rest are in
+  interfaces, where nested classes are implicitly static anyway.
+- **`NoClassDefFoundError` for `AccessibilityRecord`, `AccessibilityEvent`,
+  `AudioDeviceCallback`, `Notification$CallStyle`, `KeyPermanentlyInvalidated‐
+  Exception`, `BackupHelper`, `RecordingCanvas`, `RenderNode`, `RenderEffect`,
+  `RuntimeShader`, `SurfaceTexture` → four atlas commits adding them.** None of
+  these run: they are field types, catch clauses and API-29+ paths behind
+  `SDK_INT` checks. They still have to exist, because a class is loaded when a
+  method mentioning it is verified — or, for `SurfaceTexture`, when
+  `View.overridesOnDraw` reflects over the app's view classes.
+- **`org.json` is in the shim, and it is on the boot path.** The shim audit deferred it;
+  `LaunchActivity.getClientNotActivatedFragment` settles the question. It is
+  ART boot-classpath, JDK-absent, so it belongs in the shim by the same rule as
+  `libcore.*` — written out (six classes, `shim/src/org/json/`) rather than
+  taking a jar, so the port keeps building offline. `ShimCheck` covers a parse →
+  read → build → `toString` → re-parse round trip.
+- **Ganesh (GPU) rendering crashes; the port runs on CPU raster.** The first
+  draw calls `atl_gpu_context_create` → `GrGLMakeAssembledInterface` →
+  `GrGLExtensions::init`, which segfaults on a bogus pointer (`-800`) coming
+  back from a GL extension-string call, on llvmpipe under Xvfb *and* on hardware
+  GL — so it is not the runtime and not the headless setup. `run.sh` exports
+  `ATL_NO_GPU=1` (PRD Technical Considerations allow it for this milestone);
+  `run.sh --gpu` reproduces the crash. This is atlas GPU-path work carried on
+  the branch as WIP, not something HotSpot causes.
+- **Known cosmetic gap at this milestone:** the intro page renders its title and
+  text hard against the right edge and the animated Telegram logo does not
+  appear. The screen is up and idles cleanly for 70s, which is what the boot asks
+  for; layout/rlottie work belongs with the later UI stories.
+- **The launcher exits on the first boot exception now** (atlas *hotspot
+  launcher: stop the boot on the first exception*). It used to keep going and
+  die in `jni_GetObjectClass` on a null application object, burying the real
+  error. It also prints `boot: <step>` lines, which is what `run.sh` greps for.
+- **Kill the launcher for real.** A timed run that only sends SIGTERM can leave
+  the process alive, and the next `build-atlas.sh` then fails with "Text file
+  busy" when it installs the launcher binary. `run.sh` follows up with SIGKILL.

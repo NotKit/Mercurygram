@@ -50,7 +50,7 @@ done
 
 entries="$(unzip -l "$SHIM_JAR")"
 for class in libcore/util/NativeAllocationRegistry.class dalvik/system/CloseGuard.class \
-	android/system/Os.class org/xmlpull/v1/XmlPullParser.class; do
+	android/system/Os.class org/xmlpull/v1/XmlPullParser.class org/json/JSONObject.class; do
 	grep -q "$class" <<<"$entries" || { echo "$SHIM_JAR is missing $class" >&2; exit 1; }
 done
 

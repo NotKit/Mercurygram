@@ -49,6 +49,7 @@ would need it, so the next failure has an address.
 | `android.icu.util.ULocale` | `android.os.LocaleList` | Approximate: `addLikelySubtags` uses a short language-to-script table instead of the CLDR data. |
 | `android.icu.text.Collator` | `org.telegram.messenger.TranslateController` | Delegates to `java.text.Collator`. |
 | `android.icu.text.RelativeDateTimeFormatter` | `org.telegram.messenger.LocaleController$RelativeIcu` | Approximate and **English only**: the JDK has no relative-time patterns. A localised version needs CLDR data or the framework's own strings. |
+| `org.json.*` (`JSONObject`, `JSONArray`, `JSONTokener`, `JSONStringer`, `JSONException`, `JSON`) | `org.telegram.ui.LaunchActivity.getClientNotActivatedFragment` on the boot path, plus 80 more app classes (`ApplicationLoader`, `SharedConfig`, `LoginActivity`, `Theme`) | Written out rather than taking a jar, so the port keeps building with no network. Android has org.json on the boot classpath and the JDK does not, so it is a shim by the same rule as `libcore.*` — even though it is a library rather than a runtime service. Lenient parsing (comments, single quotes, unquoted names) and the coercions org.json documents; `ShimCheck` covers a parse → read → build → `toString` → re-parse round trip. |
 | `org.xmlpull.v1.*` | every `Drawable`, `LayoutInflater`, `Resources`, `XmlBlock$Parser` | The XmlPull v1 API (public domain). Constants match the published values because api-impl and the app have them inlined. |
 | `org.kxml2.io.KXmlParser` | `android.util.Xml.newPullParser()` (`LocaleController` parses language packs with it), `android.util.DecompiledXmlResourceParser` | An `XmlPullParser` over the JDK's StAX. `isEmptyElementTag()` always reports false (StAX does not expose it), `getNamespaceCount()` counts only the current element's declarations, and `defineEntityReplacementText()` is ignored. |
 
@@ -83,13 +84,6 @@ Commits on `linux-port/atlas` (branch `mercurygram/openjdk-port`):
 Referenced, but no caller the port reaches was found. Listed so the first real
 failure is already diagnosed:
 
-* `org.json.*` (`JSONObject`, `JSONArray`, `JSONTokener`, `JSONException`) —
-  **the largest remaining gap**: Android has it on the boot classpath, the JDK
-  does not, and no dependency jar carries it. 81 app classes reference
-  `JSONObject`, including `ApplicationLoader`, `SharedConfig` and
-  `LoginActivity`, so a boot-path failure is likely. It is a JSON library rather
-  than a runtime shim, hence not written blind here: either implement the four
-  classes or put an Apache-2.0 `org.json` jar on the classpath.
 * `org.apache.harmony.xml.ExpatReader` — `android.util.Xml.parse()`. No caller
   in the app; a SAX `XMLReader` from `SAXParserFactory` would satisfy it.
 * `org.kxml2.io.KXmlSerializer` — `android.util.Xml.newSerializer()`, used by
