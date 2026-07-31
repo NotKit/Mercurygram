@@ -40,13 +40,16 @@ jar --create --file "$SHIM_JAR" -C "$CLASSES" . -C "$SHIM_DIR/resources" .
 
 # --- JNI back end -----------------------------------------------------------
 echo "building $(basename "$SHIM_LIB")"
-"${CC:-cc}" -shared -fPIC -O2 -Wall -Wextra -std=gnu11 \
-	-I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+# The JNI back end is the one part of the shim that is not bytecode: it is built
+# for the target, against the target JDK's jni.h (identical to the host's, but
+# there is no reason to reach for the wrong one).
+"$PORT_CC" -shared -fPIC -O2 -Wall -Wextra -std=gnu11 \
+	-I"$PORT_TARGET_JAVA_HOME/include" -I"$PORT_TARGET_JAVA_HOME/include/linux" \
 	-o "$SHIM_LIB" "$SHIM_DIR/native/port_shim.c"
 
 # --- verify -----------------------------------------------------------------
 for symbol in Java_libcore_util_NativeAllocationRegistry_applyFreeFunction Java_libcore_io_Posix_open; do
-	symbols="$(nm -D --defined-only "$SHIM_LIB")"
+	symbols="$($PORT_NM -D --defined-only "$SHIM_LIB")"
 	grep -q "$symbol" <<<"$symbols" || { echo "$SHIM_LIB does not export $symbol" >&2; exit 1; }
 done
 
@@ -77,7 +80,13 @@ if ! missing="$(printf '%s\n' "$refs" | java -cp "$TOOLS_OUT:$ATLAS_OUT/api-impl
 fi
 echo "api-impl: $(wc -l <"$SCAN.txt") classes, $(printf '%s\n' "$refs" | wc -l) JDK references, all resolvable"
 
-java -cp "$TOOLS_OUT:$SHIM_JAR:$ATLAS_OUT/api-impl.jar" \
-	-Djava.library.path="$PORT_OUT" ShimCheck
+# ShimCheck loads libportshim.so into this JVM, so it only runs natively; a
+# cross build's copy is exercised by the app's first launch on the device.
+if [ "$PORT_CROSS" = 0 ]; then
+	java -cp "$TOOLS_OUT:$SHIM_JAR:$ATLAS_OUT/api-impl.jar" \
+		-Djava.library.path="$PORT_OUT" ShimCheck
+else
+	echo "(skipping ShimCheck: cannot load an $PORT_TRIPLE library here)"
+fi
 
 echo "shim: $SHIM_JAR ($(du -h "$SHIM_JAR" | cut -f1)), $SHIM_LIB"

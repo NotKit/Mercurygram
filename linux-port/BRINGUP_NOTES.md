@@ -787,3 +787,90 @@ symptom → fix; atlas commits are on `mercurygram/openjdk-port`.
   `MotionBackgroundDrawable`, `MotionBackgroundPaint` — which nests it three
   deep — and `LoadingStickerDrawable`), all with `DST_IN` gradient masks, so
   more than the fades were flat black before this.
+
+## Ubuntu Touch click (arm64 cross build)
+
+`linux-port/click/` packages the port for Ubuntu Touch 24.04 arm64. What the
+cross build turned up, in the order it hit:
+
+- **The port cross-compiles because it does not need ART.** The sibling ART
+  packaging has to build natively under qemu (`art_standalone` has no cross
+  build); this port only needs `libandroidfw` and `liblog` *prebuilt* out of that
+  tree, so everything else is built by the host toolchain against the arm64
+  sysroot in clickable's cross container. Minutes instead of hours.
+- **`libart.so` is not shipped and not even linked.** `art-standalone.pc` puts
+  `-lart -lnativebridge` on the link line, but nothing in this port calls into
+  either — the framework's only ART-side `DT_NEEDED` are `libandroidfw` and
+  `liblog`. An empty `.so` of each satisfies the linker, `--as-needed` drops it,
+  and 240 MB of ART stays out of the click.
+- **atlas's meson resolves `dx` at configure time** (the `api-impl.jar` and
+  `test_runner.jar` custom targets dex with it) even when nothing asks for those
+  targets. `dx` is a shell wrapper around `dx.jar`, so the click stages both
+  rather than patching atlas; it looks for the jar in `../framework` relative to
+  its own `bin/` first.
+- **meson's cross-file binary key for the Java compiler is `java`, and it must
+  point at `javac`.** A `javac = ...` key is silently ignored, and the build then
+  fails with `ERROR: Unknown compiler: .../bin/java`.
+- **meson ignores `CFLAGS`, `LDFLAGS` and `LIBRARY_PATH` for the host machine of
+  a cross build.** A staged prefix has to reach `cc.find_library()` through the
+  cross file's `[built-in options] c_args`/`c_link_args` instead — that is what
+  `PORT_CROSS_LIB_DIRS` in `native/write-meson-cross.sh` exists for.
+- **`[properties] java_home` is how the `jni` dependency is pointed at the target
+  JDK.** Without it meson takes the JDK that owns the `javac` in `PATH`, i.e. the
+  host's, and the launcher would try to link an x86-64 `libjvm.so`.
+- **skia's public headers reach into `modules/`** (`SkColorSpace.h` includes
+  `modules/skcms/skcms.h`), so a prebuilt-skia build needs `include/` *and*
+  `modules/`, not just `include/`.
+- **git is unavailable inside the build container.** `linux-port/atlas` is a
+  worktree whose `.git` file points outside the mounted repository, so
+  `build-atlas.sh` now degrades to "no working-tree check, revision unknown"
+  instead of failing.
+- **What Ubuntu Touch 24.04 does not ship, from the device's own `ldconfig -p`:**
+  GLFW, `libportal.so.1`, `libswscale.so.7` (though `libavcodec.so.60` is
+  there), `libmaliit-glib.so.*` and `libcontent-hub-glib.so.1`. All are
+  `DT_NEEDED` of `libtranslation_layer_main.so`, so the click carries them and
+  `build.sh` fails the build if a needed library is neither on the device (per
+  the recorded `click/device-libs.txt`) nor in the container. `libGL.so.1` *is*
+  on the device, which the framework also needs.
+- **The prebuilt `libskia.so` is the one known behavioural compromise.** It comes
+  from the ART packaging's build of atlas master, i.e. with
+  `skia_use_system_libjpeg_turbo=true`; the port's atlas branch sets it to false
+  because libjpeg-turbo 3.x segfaults on any sampled JPEG decode (see "Native
+  dependencies" above). Cross-building skia with the port's own gn args is the
+  fix; until then thumbnails are expected to crash on the device.
+
+### First run on the device (OnePlus 11, Ubuntu Touch 24.04.4)
+
+- **`"policy_version": 20.04` is rejected on 24.04.** `aa-clickhook` skips the
+  profile with `ERROR: Invalid policy version`, no profile is generated, and
+  `lomiri-app-launch` then dies in `aa-exec: ERROR: profile '<appid>' does not
+  exist` before the app runs at all. `2404.1` is the version this release
+  accepts (`/usr/share/apparmor/easyprof/policygroups/ubuntu/`). The sibling ART
+  packaging still says 20.04 and has the same bug — its profile on this device is
+  a leftover from an older release.
+- **Lomiri starts a click app with `XDG_RUNTIME_DIR=$HOME/.cache` and
+  `WAYLAND_DISPLAY=wayland-0`,** and the compositor's socket is in neither: it is
+  `/run/user/<uid>/wayland-0`. GLFW resolves the display relative to
+  `XDG_RUNTIME_DIR` and aborts the launch with "Wayland: Failed to connect to
+  display". `click/run.sh` points `WAYLAND_DISPLAY` at the absolute socket path
+  (libwayland accepts one) instead of moving `XDG_RUNTIME_DIR`, which the app
+  uses for its own storage.
+- **Debian's JDK is a tree of symlinks into `/etc/java-21-openjdk`**
+  (`conf/*.properties`, `conf/security/`, `lib/jvm.cfg`, cacerts). Copied as
+  symlinks into a click they all dangle, and the JVM dies the first time
+  anything touches a security provider — which `java.util.jar`'s signature
+  verifier does while atlas parses the apk:
+  `InternalError: Error loading java.security file`. `rsync --copy-unsafe-links`
+  is what makes the bundled runtime self-contained.
+- **`libportshim.so` has to be built for the target too.** With only the host's
+  copy in the tree the app logs "port-shim: libportshim.so is not loaded …
+  native peers will leak" and runs on regardless, which is exactly the kind of
+  failure that would have been missed without reading the log.
+- **The GPU path works on the device**, unlike on the desktop: atlas reports
+  `GPU rendering (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`. GLFW still logs
+  `EGL: Failed to find support for OpenGL` first — it probes desktop GL before
+  falling back to GLES — which is noise, not an error.
+- The two exceptions the device log shows (`ClassNotFoundException:
+  android.view.View$AttachInfo` from `WindowInsetsCompat`, and
+  `KeyGenParameterSpec cannot be cast to AlgorithmParameterSpec`) both appear in
+  the x86_64 run log too: pre-existing framework gaps, not arm64 regressions.

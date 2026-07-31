@@ -1,0 +1,77 @@
+clickable_minimum_required: 8.3.0
+
+# Ubuntu Touch 24.04 (glibc 2.39, arm64). The click bundles an arm64 OpenJDK 21,
+# the atlas framework natives and Telegram's JNI core, so it is arm64-only; the
+# arch-independent halves (api-impl.jar, app jars, app.apk, shim.jar) come from
+# the x86_64 host build under linux-port/out/.
+framework: ubuntu-touch-24.04-1.x
+restrict_arch: arm64
+
+builder: custom
+build: ${ROOT}/linux-port/click/build.sh
+build_dir: ${ROOT}/linux-port/out/click
+
+# The launcher process to stop on install/redeploy (see run.sh).
+kill: android-translation-layer-hotspot
+
+# Cross container: aarch64-linux-gnu-gcc plus an arm64 target sysroot. Nothing
+# here is built by an emulated arm64 toolchain — that is what makes a rebuild
+# minutes rather than hours (the sibling ART packaging has to build natively
+# because art_standalone only supports self-hosted builds).
+dependencies_host:
+  - clang
+  - lld
+  - meson
+  - ninja-build
+  - generate-ninja
+  - openjdk-21-jdk-headless
+  - ca-certificates-java
+  - nasm
+  - yasm
+  - pkg-config
+  - python-is-python3
+  - python3
+  - curl
+  - rsync
+  - unzip
+  - zip
+  - xz-utils
+  - zstd
+  - patch
+  - git
+
+dependencies_target:
+  # atlas: libtranslation_layer_main.so and libandroid.so.0
+  - libasound2-dev
+  - libavcodec-dev
+  - libswscale-dev
+  - libdrm-dev
+  - libegl-dev
+  - libgl-dev
+  - libgles-dev
+  - libglib2.0-dev
+  - libgraphene-1.0-dev
+  - libgstreamer1.0-dev
+  - libgstreamer-plugins-base1.0-dev
+  - libgudev-1.0-dev
+  - libportal-dev
+  - libsqlite3-dev
+  - libvulkan-dev
+  - libwayland-dev
+  - wayland-protocols
+  - libfontconfig-dev
+  - libmaliit-glib-dev
+  - libxkbcommon-dev
+  - libgbm-dev
+  - libicu-dev
+  - libopenxr-dev
+  # skia subproject (system libraries, see atlas/subprojects/packagefiles/skia)
+  - libexpat1-dev
+  - libfreetype-dev
+  - libharfbuzz-dev
+  - libpng-dev
+  - libwebp-dev
+  - zlib1g-dev
+  # the arm64 JVM the click bundles: jni.h + libjvm.so to link the launcher
+  # against, and the runtime it ships
+  - openjdk-21-jdk-headless

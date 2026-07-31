@@ -30,7 +30,40 @@ export PORT_NATIVE_OUT="$PORT_OUT/native"
 export ATLAS_BUILDDIR="${ATLAS_BUILDDIR:-$PORT_OUT/atlas-build}"
 export ATLAS_OUT="${ATLAS_OUT:-$PORT_OUT/atlas}"
 
-# Target triple for every native dependency built by linux-port/native/.
-export PORT_TRIPLE="${PORT_TRIPLE:-x86_64-linux-gnu}"
+# Target architecture of every native product: x86_64 is the desktop port, arm64
+# the Ubuntu Touch click (linux-port/click/), which cross-compiles.
+export PORT_ARCH="${PORT_ARCH:-x86_64}"
+case "$PORT_ARCH" in
+x86_64) export PORT_TRIPLE="${PORT_TRIPLE:-x86_64-linux-gnu}" ;;
+arm64)  export PORT_TRIPLE="${PORT_TRIPLE:-aarch64-linux-gnu}" ;;
+*) echo "env.sh: unsupported PORT_ARCH '$PORT_ARCH' (x86_64 or arm64)" >&2 ;;
+esac
+
+# Cross builds prefix their tools and cannot run what they produce, so every
+# script that verifies a product has to skip (or defer) that check.
+if [ "$PORT_TRIPLE" = "$(uname -m)-linux-gnu" ]; then
+	export PORT_CROSS=0
+	export PORT_TOOL_PREFIX=""
+	# clang is what the Android build uses, and what the native deps were built with.
+	export PORT_CC="${PORT_CC:-clang}"
+	export PORT_CXX="${PORT_CXX:-clang++}"
+else
+	export PORT_CROSS=1
+	export PORT_TOOL_PREFIX="${PORT_TRIPLE}-"
+	# gcc, not clang --target: the cross gcc needs no sysroot wrangling, and
+	# every build system here takes a plain compiler name without flags.
+	export PORT_CC="${PORT_CC:-${PORT_TOOL_PREFIX}gcc}"
+	export PORT_CXX="${PORT_CXX:-${PORT_TOOL_PREFIX}g++}"
+fi
+export PORT_AR="${PORT_AR:-${PORT_TOOL_PREFIX}ar}"
+export PORT_RANLIB="${PORT_RANLIB:-${PORT_TOOL_PREFIX}ranlib}"
+export PORT_STRIP="${PORT_STRIP:-${PORT_TOOL_PREFIX}strip}"
+export PORT_NM="${PORT_NM:-${PORT_TOOL_PREFIX}nm}"
+export PORT_PKG_CONFIG="${PORT_PKG_CONFIG:-${PORT_TOOL_PREFIX}pkg-config}"
+
+# The JDK the target runs on. Same version as JAVA_HOME, other architecture:
+# jni.h for the JNI libraries, lib/server/libjvm.so for the launcher. Equal to
+# JAVA_HOME on a native build.
+export PORT_TARGET_JAVA_HOME="${PORT_TARGET_JAVA_HOME:-$JAVA_HOME}"
 
 mkdir -p "$PORT_OUT" "$PORT_NATIVE_OUT"

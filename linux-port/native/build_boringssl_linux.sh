@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build BoringSSL (libssl.a + libcrypto.a) for the host x86_64-linux-gnu target.
+# Build BoringSSL (libssl.a + libcrypto.a) for $PORT_TRIPLE (see env.sh).
 # Mirrors TMessagesProj/jni/build_boringssl.sh, minus the NDK toolchain file.
 #
 # Usage: linux-port/native/build_boringssl_linux.sh [--clean]
@@ -25,9 +25,14 @@ fi
 # Same AES-IGE patch the Android build applies; the script is itself idempotent.
 (cd "$JNI_DIR" && ./patch_boringssl.sh)
 
+cmake_args=()
+[ "$PORT_CROSS" = 1 ] &&
+	cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=$PORT_DIR/native/toolchain-cross.cmake")
+
 # PIC is required because libtmessages.so links these archives into a .so.
 # The __FILE__ redefinition matches the Android build (shorter paths in errors).
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" -GNinja \
+	"${cmake_args[@]+"${cmake_args[@]}"}" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 	-DBUILD_SHARED_LIBS=OFF \

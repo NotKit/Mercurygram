@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build dav1d (libdav1d.a) for the host x86_64-linux-gnu target.
+# Build dav1d (libdav1d.a) for $PORT_TRIPLE (see env.sh).
 # Mirrors TMessagesProj/jni/build_dav1d.sh, minus the meson cross file.
 #
 # Usage: linux-port/native/build_dav1d_linux.sh [--clean]
@@ -21,14 +21,24 @@ if [ ! -f "$SRC_DIR/meson.build" ]; then
 	exit 1
 fi
 
-for tool in meson ninja nasm; do
+tools="meson ninja"
+# nasm assembles dav1d's x86 asm; arm64 uses gas through the C compiler.
+[ "$PORT_ARCH" = x86_64 ] && tools="$tools nasm"
+for tool in $tools; do
 	command -v "$tool" >/dev/null \
 		|| { echo "$tool not found; install it (apt install meson ninja-build nasm)" >&2; exit 1; }
 done
 
+meson_args=()
+if [ "$PORT_CROSS" = 1 ]; then
+	"$PORT_DIR/native/write-meson-cross.sh" "$PORT_NATIVE_OUT/meson-cross.ini"
+	meson_args+=(--cross-file "$PORT_NATIVE_OUT/meson-cross.ini")
+fi
+
 # --libdir lib: meson would otherwise use Debian's lib/x86_64-linux-gnu layout.
 if [ ! -f "$BUILD_DIR/build.ninja" ]; then
 	meson setup \
+		"${meson_args[@]+"${meson_args[@]}"}" \
 		--prefix "$OUT_DIR" \
 		--libdir lib \
 		--default-library static \

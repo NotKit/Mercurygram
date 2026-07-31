@@ -9,10 +9,13 @@
 /*
  * 1. The NDK's libc++ pulls these in transitively from <string> and friends;
  *    libstdc++ does not, so tgnet and rlottie reference std::unique_ptr,
- *    std::memcpy and std::max without including anything.
+ *    std::memcpy, std::max and std::int32_t without including anything.
+ *    (<cstdint> is only missed by gcc: clang's libstdc++ path happens to have
+ *    it already, so this one first showed in the arm64 cross build.)
  */
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <sys/time.h>

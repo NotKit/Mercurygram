@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Mercurygram (JVM)
+Comment=Telegram (Mercurygram) on OpenJDK via the atlas framework
+Exec=run.sh %u
+Icon=mercurygram-jvm.svg
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;
+X-Ubuntu-Touch=true
+X-Lomiri-Touch=true

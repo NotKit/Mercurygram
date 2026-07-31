@@ -1,0 +1,15 @@
+{
+    "name": "mercurygram-jvm.nekit",
+    "description": "Telegram (Mercurygram) on OpenJDK with the atlas framework as jars",
+    "architecture": "@CLICK_ARCH@",
+    "title": "Mercurygram (JVM)",
+    "hooks": {
+        "mercurygram-jvm": {
+            "apparmor": "mercurygram-jvm.apparmor",
+            "desktop": "mercurygram-jvm.desktop"
+        }
+    },
+    "version": "@CLICK_VERSION@",
+    "maintainer": "Nikita Ukhrenkov <nikita.ukhrenkov@volla.online>",
+    "framework": "@CLICK_FRAMEWORK@"
+}

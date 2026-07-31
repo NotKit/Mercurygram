@@ -201,3 +201,19 @@
   (`PortClassCheck`, `ViewSignatureCheck`) need `out/shim.jar` — the app's own
   classes name `org.json`. `build-atlas.sh` therefore skips those checks while
   the shim is missing, and `build-all.sh` re-runs it after `build-shim.sh`.
+- The Ubuntu Touch click lives in `click/`, but its `clickable.yaml` is at the
+  repository root: clickable mounts only the project root into the build
+  container, and the build needs `TMessagesProj/jni/**` as well as `linux-port/`.
+- `PORT_ARCH=arm64` retargets every script the port has (`env.sh` derives the
+  triple, the tool prefix, `PORT_CROSS` and the target JDK from it). Add an arch
+  case to the script that needs one; never fork a script per architecture, and
+  keep the x86_64 path bit-identical.
+- A cross build cannot run what it produces: `ldd`, `dlopen_check` and
+  `ShimCheck` are skipped when `PORT_CROSS=1`, and `click/build.sh` replaces them
+  with a static check — every staged object is aarch64, and every `DT_NEEDED` is
+  either bundled or in `click/device-libs.txt`, the device's own `ldconfig -p`.
+  Re-record that file when the device's release changes.
+- The click's arm64 inputs that are not built here (art's `libandroidfw`, ART's
+  boot jars, GLFW, `libskia.so`) come from the sibling ART packaging's build tree
+  through `click/stage-prebuilt.sh`, which writes a `PROVENANCE.md` beside them.
+  Nothing else may reach outside the repository: the container cannot see it.

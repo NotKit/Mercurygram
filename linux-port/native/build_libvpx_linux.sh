@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build libvpx (libvpx.a) for the host x86_64-linux-gnu target.
-# Mirrors TMessagesProj/jni/build_libvpx_clang.sh's x86_64 case, minus the NDK.
+# Build libvpx (libvpx.a) for $PORT_TRIPLE (see env.sh).
+# Mirrors TMessagesProj/jni/build_libvpx_clang.sh's case for that arch, minus
+# the NDK.
 #
 # Usage: linux-port/native/build_libvpx_linux.sh [--clean]
 set -euo pipefail
@@ -25,19 +26,36 @@ fi
 # which would dirty the submodule.
 mkdir -p "$BUILD_DIR"
 
-export CC="${CC:-clang}"
-export CXX="${CXX:-clang++}"
-# -DANDROID and -fpie dropped; the rest matches the Android x86_64 case.
-export CFLAGS="-O3 -march=x86-64 -mtune=generic -msse4.2 -mpopcnt -m64 -fPIC"
+export CC="$PORT_CC"
+export CXX="$PORT_CXX"
+# libvpx's own build system prefixes its tools with $CROSS, so a cross build
+# needs nothing else to find ar/ranlib/as.
+[ "$PORT_CROSS" = 1 ] && export CROSS="$PORT_TOOL_PREFIX"
+
+# -DANDROID and -fpie dropped; the rest matches the Android case for the arch.
+case "$PORT_ARCH" in
+x86_64)
+	export CFLAGS="-O3 -march=x86-64 -mtune=generic -msse4.2 -mpopcnt -m64 -fPIC"
+	vpx_target=x86_64-linux-gcc
+	# yasm is x86-only; on arm64 libvpx assembles NEON with the C compiler.
+	vpx_arch_args=(--enable-runtime-cpu-detect --as=yasm)
+	;;
+arm64)
+	export CFLAGS="-O3 -march=armv8-a -fPIC"
+	vpx_target=arm64-linux-gcc
+	# --disable-neon-{asm,dotprod} as the Android build does for every arch:
+	# the intrinsics paths stay, the hand-written .S files go.
+	vpx_arch_args=(--disable-runtime-cpu-detect --disable-neon-asm --disable-neon-dotprod)
+	;;
+esac
 export CPPFLAGS="$CFLAGS"
 export CXXFLAGS="$CFLAGS -std=c++11"
 
 if [ ! -f "$BUILD_DIR/Makefile" ]; then
 	(cd "$BUILD_DIR" && "$SRC_DIR/configure" \
 		--prefix="$OUT_DIR" \
-		--target=x86_64-linux-gcc \
-		--enable-runtime-cpu-detect \
-		--as=yasm \
+		--target="$vpx_target" \
+		"${vpx_arch_args[@]}" \
 		--enable-static \
 		--enable-pic \
 		--disable-docs \

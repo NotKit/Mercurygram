@@ -52,6 +52,7 @@ atlas android-translation-layer-hotspot
 | --- | --- |
 | `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `PORT_OUT`); source it, don't run it |
 | `build-all.sh` | every build step below, in dependency order — the one-command build |
+| `click/` | the arm64 Ubuntu Touch click: cross build and packaging, on top of everything below (`click/README.md`) |
 | `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on branch `mercurygram/openjdk-port`, gitignored here |
 | `build-atlas.sh` | builds atlas from `atlas/` into `out/atlas-build/`, installs `out/atlas/` |
 | `check-env.sh` | toolchain smoke test; exits 0 when the environment is usable |
@@ -93,6 +94,8 @@ atlas android-translation-layer-hotspot
 ```sh
 linux-port/build-all.sh      # build everything, ~1 min incremental
 linux-port/run.sh            # start Mercurygram
+
+linux-port/click/make-click.sh   # and, on top of that, the Ubuntu Touch click
 ```
 
 That is the whole port: `build-all.sh` runs the steps of the following sections
@@ -605,8 +608,12 @@ messages, emoji panel. What is knowingly missing:
 - **CPU raster only.** `run.sh` exports `ATL_NO_GPU=1`: atlas's Ganesh path
   segfaults inside skia's `GrGLExtensions::init` on every GL driver on this
   machine, hardware and llvmpipe alike. `--gpu` reproduces it.
-- **x86_64 glibc only.** arm64 and Ubuntu Touch click packaging are the next
-  phase, as is the GraalVM native image (below).
+- **The Ubuntu Touch click is a first bring-up.** `linux-port/click/` cross-builds
+  the port for arm64 and packages it (`click/README.md`); it boots on the device
+  to the main activity with hardware GPU rendering and a live MTProto connection,
+  but it ships a prebuilt `libskia.so` whose libjpeg-turbo choice is known to
+  segfault on sampled JPEG decodes. The GraalVM native image (below) is still
+  ahead of both.
 - **Debug build.** `afatFdX86_64Debug` is the only usable variant, because R8
   renames the classes the launcher and the shims name. It is a
   `DEBUG_PRIVATE_VERSION`, so the app answers any uncaught exception with

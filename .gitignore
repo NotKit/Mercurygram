@@ -26,6 +26,8 @@ API_KEYS
 linux-port/out/
 # atlas (atl-touch) source worktree; its own git repo, see linux-port/README.md.
 linux-port/atlas/
+# clickable's per-project container state (linux-port/click/).
+.clickable/
 # Gradle kotlin-dsl scratch dir (buildSrc); not a build product path we control.
 .kotlin/
 

@@ -38,12 +38,29 @@ done
 
 [ -f "$ATLAS_DIR/meson.build" ] ||
 	{ echo "no atlas checkout at $ATLAS_DIR (see linux-port/README.md)" >&2; exit 1; }
-for tool in meson ninja gn clang; do
+
+# $PORT_SKIA_PREBUILT points at a directory holding a libskia.so built for the
+# target and skia's include/ tree. With it, atlas links that instead of building
+# the skia subproject — the only way to get a cross build (linux-port/click/).
+skia_prebuilt="${PORT_SKIA_PREBUILT:-}"
+
+tools="meson ninja"
+[ -n "$skia_prebuilt" ] || tools="$tools gn clang"
+for tool in $tools; do
 	command -v "$tool" >/dev/null || { echo "missing build tool: $tool" >&2; exit 1; }
 done
 
+if [ -n "$skia_prebuilt" ]; then
+	for f in libskia.so include/core/SkCanvas.h; do
+		[ -e "$skia_prebuilt/$f" ] ||
+			{ echo "PORT_SKIA_PREBUILT=$skia_prebuilt has no $f" >&2; exit 1; }
+	done
+fi
+
 # The skia subproject is the shared ~8 GB checkout; never download it again.
-if [ ! -e "$ATLAS_DIR/subprojects/skia" ]; then
+if [ -n "$skia_prebuilt" ]; then
+	: # not used at all in this configuration
+elif [ ! -e "$ATLAS_DIR/subprojects/skia" ]; then
 	[ -d "$ATLAS_SKIA_DIR" ] ||
 		{ echo "no skia sources: set ATLAS_SKIA_DIR (tried $ATLAS_SKIA_DIR)" >&2; exit 1; }
 	ln -s "$ATLAS_SKIA_DIR" "$ATLAS_DIR/subprojects/skia"
@@ -54,21 +71,26 @@ fi
 # extracts the wrap, and the shared checkout was extracted long ago. Copy them
 # again when atlas changes them, or a skia build option committed on the atlas
 # branch would never reach the build.
-for f in "$ATLAS_DIR"/subprojects/packagefiles/skia/*; do
-	dst="$ATLAS_DIR/subprojects/skia/$(basename "$f")"
-	cmp -s "$f" "$dst" || { cp "$f" "$dst"; echo "updated subprojects/skia/$(basename "$f")"; }
-done
+if [ -z "$skia_prebuilt" ]; then
+	for f in "$ATLAS_DIR"/subprojects/packagefiles/skia/*; do
+		dst="$ATLAS_DIR/subprojects/skia/$(basename "$f")"
+		cmp -s "$f" "$dst" || { cp "$f" "$dst"; echo "updated subprojects/skia/$(basename "$f")"; }
+	done
+fi
 
 # builddir-relative source | destination name | ninja target | required
 artifacts=(
 	"src/api-impl/hax.jar|api-impl.jar|src/api-impl/hax.jar|yes"
 	"libtranslation_layer_main.so|libtranslation_layer_main.so|libtranslation_layer_main.so|yes"
 	"libandroid.so.0|libandroid.so.0|libandroid.so.0|yes"
-	"subprojects/skia/libskia.so|libskia.so|subprojects/skia/libskia.so|yes"
 	"res/framework-res/framework-res.apk|framework-res.apk|res/framework-res/framework-res.apk|yes"
 	"android-translation-layer-hotspot|android-translation-layer-hotspot|android-translation-layer-hotspot|yes"
 	"libatl_webview_qt.so|libatl_webview_qt.so|libatl_webview_qt.so|no"
 )
+# The subproject builds libskia.so into the builddir; a prebuilt one is copied
+# from where it was found instead (below), so it is not a ninja target here.
+[ -n "$skia_prebuilt" ] ||
+	artifacts+=("subprojects/skia/libskia.so|libskia.so|subprojects/skia/libskia.so|yes")
 
 # --- configure --------------------------------------------------------------
 
@@ -76,30 +98,55 @@ artifacts=(
 # at setup time, so a builddir remembers the JDK it was configured with. The
 # framework must be compiled by the same JDK the port runs on (21), and the
 # system default here is 25 -- hence the stamp and the forced reconfigure.
+setup_args=()
+if [ -n "$skia_prebuilt" ]; then
+	setup_args+=("-Dskia-prebuilt=$skia_prebuilt")
+fi
+if [ "$PORT_CROSS" = 1 ]; then
+	cross_file="$PORT_OUT/meson-cross.ini"
+	"$PORT_DIR/native/write-meson-cross.sh" "$cross_file"
+	setup_args+=(--cross-file "$cross_file")
+fi
+
+# The stamp covers the target too: a cross file and a prebuilt skia are as
+# baked into coredata as the compiler is, and out/ is per-arch anyway.
 jdk_stamp="$ATLAS_BUILDDIR/.port-jdk"
+stamp_value="$JAVA_HOME $PORT_TRIPLE ${setup_args[*]+${setup_args[*]}}"
 if [ -f "$ATLAS_BUILDDIR/build.ninja" ] &&
-   [ "$(cat "$jdk_stamp" 2>/dev/null || true)" != "$JAVA_HOME" ]; then
-	echo "builddir was configured with a different JDK than $JAVA_HOME, reconfiguring"
+   [ "$(cat "$jdk_stamp" 2>/dev/null || true)" != "$stamp_value" ]; then
+	echo "builddir was configured differently ($stamp_value), reconfiguring"
 	reconfigure=1
 fi
 
 if [ ! -f "$ATLAS_BUILDDIR/build.ninja" ]; then
-	meson setup "$ATLAS_BUILDDIR" "$ATLAS_DIR"
-	echo "$JAVA_HOME" >"$jdk_stamp"
+	meson setup "${setup_args[@]+"${setup_args[@]}"}" "$ATLAS_BUILDDIR" "$ATLAS_DIR"
+	echo "$stamp_value" >"$jdk_stamp"
 elif [ "$reconfigure" = 1 ]; then
 	# --wipe, not --reconfigure: the java compiler is cached in coredata, so a JDK
 	# change only takes effect on a from-scratch configure. It costs a full rebuild
 	# including skia, so the stamp above exists to make this happen at most once.
-	meson setup --wipe "$ATLAS_BUILDDIR" "$ATLAS_DIR"
-	echo "$JAVA_HOME" >"$jdk_stamp"
+	meson setup --wipe "${setup_args[@]+"${setup_args[@]}"}" "$ATLAS_BUILDDIR" "$ATLAS_DIR"
+	echo "$stamp_value" >"$jdk_stamp"
 fi
 
 # --- build ------------------------------------------------------------------
 
+# The click's build container mounts this repository and nothing else, and the
+# atlas checkout there is a worktree whose .git file points outside it — so git
+# is simply unavailable, and the working-tree check and the provenance below
+# have to cope. A native build always has it.
+if git -C "$ATLAS_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+	atlas_git=1
+else
+	atlas_git=0
+	echo "note: no usable git for $ATLAS_DIR, skipping the working-tree check"
+fi
+
 # javac writes generated JNI headers back into the atlas source tree
 # (src/api-impl/meson.build's -h flag). Those belong on the atlas branch, so the
 # build is allowed to touch them -- but nothing else.
-tree_before=$(git -C "$ATLAS_DIR" status --porcelain)
+tree_before=""
+[ "$atlas_git" = 0 ] || tree_before=$(git -C "$ATLAS_DIR" status --porcelain)
 
 targets=()
 for entry in "${artifacts[@]}"; do
@@ -108,7 +155,8 @@ for entry in "${artifacts[@]}"; do
 done
 ninja -C "$ATLAS_BUILDDIR" "${targets[@]}"
 
-tree_after=$(git -C "$ATLAS_DIR" status --porcelain)
+tree_after=""
+[ "$atlas_git" = 0 ] || tree_after=$(git -C "$ATLAS_DIR" status --porcelain)
 if [ "$tree_before" != "$tree_after" ]; then
 	echo "the atlas build changed its own working tree:"
 	diff <(echo "$tree_before") <(echo "$tree_after") || true
@@ -137,6 +185,10 @@ for entry in "${artifacts[@]}"; do
 	cp "$ATLAS_BUILDDIR/$src" "$ATLAS_OUT/$dst"
 done
 
+# A prebuilt libskia.so is not a build product, but it is still what the natives
+# resolve through their $ORIGIN/ RUNPATH, so it has to sit here with them.
+[ -z "$skia_prebuilt" ] || cp "$skia_prebuilt/libskia.so" "$ATLAS_OUT/libskia.so"
+
 # DT_NEEDED of libtranslation_layer_main.so is the soname; the RUNPATH's leading
 # $ORIGIN/ is why libskia.so and libandroid.so.0 work from this one flat dir.
 ln -sfn libandroid.so.0 "$ATLAS_OUT/libandroid.so"
@@ -147,10 +199,16 @@ ln -sfn libandroid.so.0 "$ATLAS_OUT/libandroid.so"
 mkdir -p "$ATLAS_OUT/system/etc"
 cp "$ATLAS_DIR/res/fonts.xml" "$ATLAS_OUT/system/etc/fonts.xml"
 
-atlas_branch=$(git -C "$ATLAS_DIR" branch --show-current)
-atlas_rev=$(git -C "$ATLAS_DIR" rev-parse --short HEAD)
-atlas_dirty=""
-[ -n "$(git -C "$ATLAS_DIR" status --porcelain)" ] && atlas_dirty=" (working tree dirty)"
+if [ "$atlas_git" = 1 ]; then
+	atlas_branch=$(git -C "$ATLAS_DIR" branch --show-current)
+	atlas_rev=$(git -C "$ATLAS_DIR" rev-parse --short HEAD)
+	atlas_dirty=""
+	[ -n "$(git -C "$ATLAS_DIR" status --porcelain)" ] && atlas_dirty=" (working tree dirty)"
+else
+	atlas_branch="unknown"
+	atlas_rev="unknown"
+	atlas_dirty=" (no git here; see the host build's ARTIFACTS.md for the revision)"
+fi
 jdk_version=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1)
 
 # --- verification -----------------------------------------------------------
@@ -183,20 +241,25 @@ major=$("$JAVA_HOME/bin/javap" -verbose -cp "$ATLAS_OUT/api-impl.jar" android.os
 	echo "unexpected class file major version '$major'" >&2; exit 1; }
 
 # ldd from the destination dir: an unresolved library here is a missing artifact.
-tl_ldd=$(cd "$ATLAS_OUT" && ldd libtranslation_layer_main.so)
-if grep -q "not found" <<<"$tl_ldd"; then
-	echo "unresolved dependencies of the installed libtranslation_layer_main.so:" >&2
-	grep "not found" <<<"$tl_ldd" >&2
-	exit 1
+# It only works natively — the host loader cannot read a foreign-arch object —
+# so on a cross build the click's own staging check does this instead
+# (linux-port/click/build.sh).
+if [ "$PORT_CROSS" = 0 ]; then
+	tl_ldd=$(cd "$ATLAS_OUT" && ldd libtranslation_layer_main.so)
+	if grep -q "not found" <<<"$tl_ldd"; then
+		echo "unresolved dependencies of the installed libtranslation_layer_main.so:" >&2
+		grep "not found" <<<"$tl_ldd" >&2
+		exit 1
+	fi
 fi
 
 # The symbols the boot sequence and libtmessages call into.
-tl_syms=$(nm -D --defined-only "$ATLAS_OUT/libtranslation_layer_main.so")
+tl_syms=$("$PORT_NM" -D --defined-only "$ATLAS_OUT/libtranslation_layer_main.so")
 for sym in Java_android_os_MessageQueue_nativeInit Java_android_content_Context_native_1get_1apk_1path; do
 	grep -q " T $sym\$" <<<"$tl_syms" || {
 		echo "libtranslation_layer_main.so does not export $sym" >&2; exit 1; }
 done
-android_syms=$(nm -D --defined-only "$ATLAS_OUT/libandroid.so.0")
+android_syms=$("$PORT_NM" -D --defined-only "$ATLAS_OUT/libandroid.so.0")
 for sym in AndroidBitmap_lockPixels AAssetManager_open; do
 	grep -q " T $sym\$" <<<"$android_syms" || {
 		echo "libandroid.so.0 does not export $sym" >&2; exit 1; }
@@ -206,8 +269,8 @@ done
 # the library imports these from whatever executable loads it, so a missing one
 # is not a link error, it is a crash at startup.
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
-launcher_syms=$(nm -D --defined-only "$launcher")
-tl_undef=$(nm -D --undefined-only "$ATLAS_OUT/libtranslation_layer_main.so" | awk '{print $2}')
+launcher_syms=$("$PORT_NM" -D --defined-only "$launcher")
+tl_undef=$("$PORT_NM" -D --undefined-only "$ATLAS_OUT/libtranslation_layer_main.so" | awk '{print $2}')
 for sym in apk_path atl_window get_app_data_dir bionic_dlopen bionic_dlsym \
 	bionic_eglCreateWindowSurface bionic_eglDestroySurface bionic_eglGetDisplay \
 	bionic_eglMakeCurrent bionic_eglSwapBuffers bionic_glBindFramebuffer
@@ -219,9 +282,11 @@ do
 done
 
 # everything but libjvm.so, which the run scripts add to LD_LIBRARY_PATH
-launcher_ldd=$(cd "$ATLAS_OUT" && ldd android-translation-layer-hotspot || true)
-missing=$(grep "not found" <<<"$launcher_ldd" | grep -v libjvm || true)
-[ -z "$missing" ] || { echo "unresolved launcher dependencies:" >&2; echo "$missing" >&2; exit 1; }
+if [ "$PORT_CROSS" = 0 ]; then
+	launcher_ldd=$(cd "$ATLAS_OUT" && ldd android-translation-layer-hotspot || true)
+	missing=$(grep "not found" <<<"$launcher_ldd" | grep -v libjvm || true)
+	[ -z "$missing" ] || { echo "unresolved launcher dependencies:" >&2; echo "$missing" >&2; exit 1; }
+fi
 
 res_listing=$(unzip -l "$ATLAS_OUT/framework-res.apk")
 grep -q "resources.arsc" <<<"$res_listing" || {

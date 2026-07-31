@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build ffmpeg (libav*.a, libsw*.a) for the host x86_64-linux-gnu target.
-# Mirrors TMessagesProj/jni/build_ffmpeg_clang.sh's x86_64 case, minus the NDK,
+# Build ffmpeg (libav*.a, libsw*.a) for $PORT_TRIPLE (see env.sh).
+# Mirrors TMessagesProj/jni/build_ffmpeg_clang.sh's case for the arch, minus the NDK,
 # and applies the same private-header patches as jni/patch_ffmpeg.sh.
 #
 # Needs libvpx first (--enable-libvpx): run build_libvpx_linux.sh.
@@ -31,8 +31,20 @@ if [ ! -f "$LIBVPX_DIR/lib/libvpx.a" ]; then
 	exit 1
 fi
 
-CC="${CC:-clang}"
-CXX="${CXX:-clang++}"
+CC="$PORT_CC"
+CXX="$PORT_CXX"
+
+# --arch, plus --cross-prefix when cross-compiling, is all ffmpeg needs; the
+# Android script's per-arch OPTIMIZE_CFLAGS are empty for both of these arches.
+# Its ADDITIONAL_CONFIGURE_FLAG is mirrored as well: --disable-asm for x86_64,
+# NEON for arm64, where the video decoders have to keep up on a phone.
+ff_arch_args=()
+case "$PORT_ARCH" in
+x86_64) ff_arch_args+=(--arch=x86_64 --disable-asm) ;;
+arm64)  ff_arch_args+=(--arch=aarch64 --enable-neon --enable-optimizations) ;;
+esac
+[ "$PORT_CROSS" = 1 ] &&
+	ff_arch_args+=(--enable-cross-compile "--cross-prefix=$PORT_TOOL_PREFIX")
 
 # Out-of-tree build: the Android script builds in-tree and `make clean`s, which
 # would dirty the submodule.
@@ -45,7 +57,7 @@ if [ ! -f "$BUILD_DIR/config.h" ]; then
 		--cc="$CC" \
 		--cxx="$CXX" \
 		--enable-stripping \
-		--arch=x86_64 \
+		"${ff_arch_args[@]}" \
 		--target-os=linux \
 		--prefix="$OUT_DIR" \
 		--enable-pic \
@@ -103,8 +115,7 @@ if [ ! -f "$BUILD_DIR/config.h" ]; then
 		--enable-demuxer=matroska \
 		--enable-demuxer=mp3 \
 		--enable-demuxer=aac \
-		--enable-hwaccels \
-		--disable-asm)
+		--enable-hwaccels)
 fi
 
 make -C "$BUILD_DIR" -j"$(nproc)"
