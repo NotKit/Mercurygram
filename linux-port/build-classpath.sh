@@ -16,15 +16,20 @@ APK="$PORT_OUT/app.apk"
 MG_BUILD_TAG="${MG_BUILD_TAG:-$(sed -n 's/^APP_VERSION_NAME=//p' "$REPO_DIR/gradle.properties").1}"
 
 # TMessagesProj/build.gradle reads ./API_KEYS eagerly at configure time. The port
-# only needs the file to exist to build; a real APP_ID/APP_HASH pair is needed
-# before login works, so export them and re-run to bake real keys in.
-if [ ! -s "$REPO_DIR/API_KEYS" ]; then
-	printf 'APP_ID = %s\nAPP_HASH = %s\n' "${APP_ID:-0}" "${APP_HASH:-0}" \
+# only needs the file to exist to build, but every request that opens a
+# connection is rejected without a real APP_ID/APP_HASH pair, so exporting them
+# rewrites the file (and thus BuildConfig) rather than being ignored.
+if [ -n "${APP_ID:-}" ]; then
+	printf 'APP_ID = %s\nAPP_HASH = %s\n' "$APP_ID" "${APP_HASH:-0}" \
 		> "$REPO_DIR/API_KEYS"
-	if [ -z "${APP_ID:-}" ]; then
-		echo "warning: wrote a dummy $REPO_DIR/API_KEYS; MTProto login needs real" \
-			"keys (export APP_ID / APP_HASH and re-run)" >&2
-	fi
+elif [ ! -s "$REPO_DIR/API_KEYS" ]; then
+	printf 'APP_ID = 0\nAPP_HASH = 0\n' > "$REPO_DIR/API_KEYS"
+	echo "warning: wrote a dummy $REPO_DIR/API_KEYS; a login needs real keys" \
+		"(export APP_ID / APP_HASH and re-run)" >&2
+fi
+if [ "$(sed -n 's/^APP_ID *= *//p' "$REPO_DIR/API_KEYS")" = 0 ]; then
+	echo "note: building with APP_ID=0; Telegram answers CONNECTION_API_ID_INVALID" \
+		"to everything, so no session can be used" >&2
 fi
 
 # -PlinuxPort skips the NDK build; the port has its own libtmessages.so.

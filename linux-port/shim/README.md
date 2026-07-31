@@ -9,6 +9,10 @@ api-impl code paths that reach into the shim.
 The shim compiles against the JDK only — never against api-impl. If a shim class
 ever needs a framework type, that is a sign the code belongs in atlas instead.
 
+`resources/` is the one part of the jar that is not classes: service
+registrations that make a shim the platform default the way libcore's are on ART
+(currently `javax.xml.parsers.SAXParserFactory`).
+
 ## How the list was decided
 
 `audit-shim.sh` reproduces it:
@@ -51,6 +55,7 @@ would need it, so the next failure has an address.
 | `android.icu.text.RelativeDateTimeFormatter` | `org.telegram.messenger.LocaleController$RelativeIcu` | Approximate and **English only**: the JDK has no relative-time patterns. A localised version needs CLDR data or the framework's own strings. |
 | `org.json.*` (`JSONObject`, `JSONArray`, `JSONTokener`, `JSONStringer`, `JSONException`, `JSON`) | `org.telegram.ui.LaunchActivity.getClientNotActivatedFragment` on the boot path, plus 80 more app classes (`ApplicationLoader`, `SharedConfig`, `LoginActivity`, `Theme`) | Written out rather than taking a jar, so the port keeps building with no network. Android has org.json on the boot classpath and the JDK does not, so it is a shim by the same rule as `libcore.*` — even though it is a library rather than a runtime service. Lenient parsing (comments, single quotes, unquoted names) and the coercions org.json documents; `ShimCheck` covers a parse → read → build → `toString` → re-parse round trip. |
 | `org.xmlpull.v1.*` | every `Drawable`, `LayoutInflater`, `Resources`, `XmlBlock$Parser` | The XmlPull v1 API (public domain). Constants match the published values because api-impl and the app have them inlined. |
+| `org.apache.harmony.xml.parsers.SAXParserFactoryImpl` | `org.telegram.messenger.SvgHelper` (every SVG the app parses: forum topic bubbles, message placeholders), through `javax.xml.parsers.SAXParserFactory.newInstance()` | The JAXP default on ART, and it has to be the default here too — registered in `shim/resources/META-INF/services/javax.xml.parsers.SAXParserFactory`, which is the only thing in the jar that is not a class. Delegates to the JDK's own factory with namespaces always on, because libcore's Expat parser fills in `localName` whether it is namespace-aware or not and Xerces does not; `SvgHelper` switches on `localName`, so without this every SVG parsed into an empty drawable and the first caller indexing into it killed the process (BRINGUP_NOTES.md, under the chat-list bring-up). `isNamespaceAware()` still answers what the caller set. |
 | `org.kxml2.io.KXmlParser` | `android.util.Xml.newPullParser()` (`LocaleController` parses language packs with it), `android.util.DecompiledXmlResourceParser` | An `XmlPullParser` over the JDK's StAX. `isEmptyElementTag()` always reports false (StAX does not expose it), `getNamespaceCount()` counts only the current element's declarations, and `defineEntityReplacementText()` is ignored. |
 
 ## Fixed in atlas, not shimmed

@@ -62,6 +62,8 @@ atlas android-translation-layer-hotspot
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
 | `check-mtproto.sh` | boots the app, drives the login screen with `xdotool` and checks the DC handshake and the `auth.sendCode` round trip in `out/run.log` |
+| `check-messages.sh` | opens Saved Messages, sends a text and checks the server ack and an incoming message in `out/run.log` |
+| `check-emoji.sh` | opens the emoji panel in Saved Messages, checks the glyphs it reads from `assets/emoji/`, taps one and sends it |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -393,6 +395,7 @@ answers, including that a `Cleaner` really calls the native free function.
 ```sh
 linux-port/run.sh                     # until the window is closed
 linux-port/run.sh --seconds 60        # timed run: checks run.log, takes a screenshot
+linux-port/run.sh --seconds 600 --stop-file /tmp/done   # ... or until that file appears
 linux-port/run.sh --fresh             # start from an empty data dir
 linux-port/run.sh --gpu               # try Ganesh again (currently crashes, see below)
 linux-port/run.sh -- --window-width 1280   # anything after -- goes to the launcher
@@ -403,9 +406,16 @@ is honoured too), the log is `out/run.log` and timed runs write
 `out/screenshots/run.png`. With no session, `launcher/display.sh` starts an Xvfb.
 
 A timed run is also the story's check: it requires `boot: Application.onCreate
-returned` and `boot: main activity started` in the log, no `hs_err`, and no
-uncaught exception for the whole run. That now reaches the Telegram
-intro screen ("Start Messaging") and idles cleanly for 70s.
+returned` and `boot: main activity started` in the log, no `hs_err`, no uncaught
+exception for the whole run, and no `FATAL/tmessages` in the app's own log —
+this build is a `DEBUG_PRIVATE_VERSION`, so the app answers an uncaught exception
+with `System.exit(2)`, which the launcher hangs in, leaving a window that looks
+alive and is not. This now reaches the Telegram intro screen ("Start
+Messaging") and idles cleanly; with a transplanted session it reaches the chat list.
+
+`--stop-file PATH` makes `--seconds` an upper bound: the run ends as soon as
+that file appears, so a driving script (`check-chatlist.sh`) can allow for a
+slow first sync without paying for it every time.
 
 Two things to know about the run:
 
@@ -416,6 +426,8 @@ Two things to know about the run:
 - **`-Dtmessages.native.path`** points `NativeLoader` at
   `out/libtmessages.so`; without it the app would try to unpack an Android `.so`
   from the apk.
+- **`ANDROID_LOG_TAGS=*:V`** is exported, or liblog would drop everything below
+  `INFO` and the app's own `FileLog.d` output would never reach `out/run.log`.
 
 A timed run ends by killing the launcher, which does not stop on `SIGTERM` yet,
 so `run.sh` follows up with `SIGKILL` and accepts exit 137 as a normal ending.
@@ -449,3 +461,107 @@ server answers every request that opens a connection with
 `400 CONNECTION_API_ID_INVALID`. That is a complete round trip, all this check
 asks for, but it is not a login: export `APP_ID`/`APP_HASH` and re-run
 `build-classpath.sh` before transplanting a session.
+
+### Chat list with an existing session
+
+```sh
+linux-port/transplant-session.sh                  # copy a logged-in ART/ATL data dir
+linux-port/transplant-session.sh --from DIR --force
+linux-port/check-chatlist.sh                      # -> out/screenshots/chatlist-*.png
+```
+
+The chat-list check. `transplant-session.sh` copies the data directory of a working
+ART/ATL desktop login
+(`~/.local/share/android_translation_layer/mercurygram-x64.apk_` by default)
+into the port's own (`out/data/app.apk_` — the launcher appends
+`<apk basename>_` to `ANDROID_APP_DATA_DIR`). Both runtimes are atlas, so the
+layout matches and nothing is converted; `lib/`, `extracted_assets/` and the
+SQLite `-shm` files are left out. The copy is stamped `.port-transplant`, which
+is how a re-run knows there is a session there, so `run.sh --fresh` (which wipes
+the data dir) is undone by simply running the script again.
+
+`check-chatlist.sh` transplants if needed, boots the app with `run.sh`, and
+requires:
+
+- `loaded folderId 0 loadType 1 count N` with `N > 0` — dialogs straight out of
+  `cache4.db` (`DIALOGS_LOAD_TYPE_CACHE`);
+- no `UnsatisfiedLinkError` for the SQLite JNI and no `SQLiteException`;
+- the chat list scrolls: three drags down and three back up, with the window's
+  screenshot required to change (a frozen UI would pass otherwise);
+- `run.sh`'s own verdict for the run.
+
+**API keys.** A session is useless with the dummy `APP_ID=0` — the server
+rejects every request that opens a connection. Export a real pair and rebuild
+the classpath; `build-classpath.sh` rewrites `./API_KEYS` (gitignored) from the
+environment:
+
+```sh
+APP_ID=... APP_HASH=... linux-port/build-classpath.sh
+```
+
+Do not run the ART build and the port at the same time: both would talk to
+Telegram with the same auth key.
+
+### Send and receive text messages
+
+```sh
+linux-port/check-messages.sh                      # -> out/screenshots/messages-*.png
+linux-port/check-messages.sh --incoming-seconds 600
+```
+
+The messaging check, on top of the same transplanted session. It opens the overflow
+menu, picks **Saved Messages**, types a `mg-port-msg-<timestamp>` line and
+sends it. Saved Messages is the only chat it is allowed to write to, so it
+refuses to type until the log says the chat that opened is the account's own
+dialog — a click that missed and landed on the dialog list would otherwise send
+a test message to a real correspondent.
+
+It requires:
+
+- the chat loaded its messages from the cache and the screen changed when it
+  opened (an empty message list is what a missing framework class looks like,
+  see `BRINGUP_NOTES.md`);
+- `send message user_id = 0 chat_id = 0 channel_id = 0` — `inputPeerSelf`, the
+  proof that the message went to Saved Messages;
+- `TL_updateMessageID` in the server's answer and `process update
+  TL_updateMessageID` in the app: the local message taking over the server's id,
+  which is the single→double check the story asks for;
+- an incoming `updateNewMessage`/`updateNewChannelMessage` processed while the
+  app keeps running, with the dialog list redrawing because of it;
+- `run.sh`'s own verdict for the run.
+
+The incoming half depends on the account receiving something during the run —
+a self-send does not come back through the update loop. `--incoming-seconds`
+(default 300) is how long it waits.
+
+### Emoji panel
+
+```sh
+linux-port/check-emoji.sh                         # -> out/screenshots/emoji-*.png
+linux-port/check-emoji.sh --emoji-at 78,731       # where in the grid to tap
+```
+
+The emoji check, on the same transplanted session and with the same
+Saved-Messages guard as `check-messages.sh`. It types a `mg-port-emoji-<timestamp>`
+marker, opens the emoji panel with the emoji button, taps a glyph, closes the
+panel and sends the line.
+
+It requires:
+
+- at least 20 distinct `assets/emoji/<page>_<index>.png` reads after the button
+  was tapped — atlas logs every asset open, and those files are only read while
+  a glyph is being painted, so this is what "the sprite sheets render" means
+  here (a full screenful is ~110);
+- a colourful grid area in the screenshot, not a blank sheet;
+- the input field to change when a glyph is tapped;
+- `send message user_id = 0 chat_id = 0 channel_id = 0` (`inputPeerSelf`),
+  `TL_updateMessageID` back from the server and the app processing it;
+- the marker followed by a non-ASCII character in the message the app stored in
+  `cache4.db` — the proof that the tap inserted a real emoji, which a
+  screenshot could not give;
+- `run.sh`'s own verdict for the run.
+
+The panel is as tall as a phone keyboard, so on a 960x540 window it covers the
+chat; the check closes it again before sending. See `BRINGUP_NOTES.md` for the
+framework bug this story found (`ImageView` dropped drawables with no intrinsic
+size, which is every emoji cell).

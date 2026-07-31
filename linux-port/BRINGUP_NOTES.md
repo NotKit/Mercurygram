@@ -477,3 +477,234 @@ symptom → fix; atlas commits are on `mercurygram/openjdk-port`.
   the invocation API), so the hung shutdown path was not identified. Worth an
   atlas fix before the chat-list check, where a SIGKILL means the SQLite cache is never
   closed cleanly.
+
+## Chat list with an existing session
+
+- **The session transplant is a plain copy.** Both runtimes are atlas, so the
+  data directory has the same shape on both sides and nothing had to be
+  converted:
+
+  | | path |
+  |---|---|
+  | source (ART/ATL desktop) | `~/.local/share/android_translation_layer/mercurygram-x64.apk_` |
+  | destination (this port) | `linux-port/out/data/app.apk_` |
+
+  The destination is `$ANDROID_APP_DATA_DIR/<apk basename>_`, which atlas's
+  `make_app_data_dir()` appends — `out/data` alone is the base, not the data
+  dir. `transplant-session.sh` copies with `rsync -a --delete
+  --delete-excluded`, leaving out `lib/` (the ART build's Android `.so`s; the port
+  loads the glibc one by path), `extracted_assets/` and the SQLite `-shm` files,
+  which both sides rebuild. It stamps `.port-transplant` with the source and the
+  date, because a plain first run creates the same files and there is otherwise
+  no way to tell a session apart from an empty data dir.
+- **Real API keys are a hard prerequisite, as the MTProto check warned.** They were
+  recovered from the working ART build's APK rather than guessed:
+  `dexdump -d classes.dex`, then read `BuildVars.<clinit>` — the `const v0`
+  feeding `sput ... APP_ID:I` and the `const-string` feeding `APP_HASH`. The
+  pair goes in `./API_KEYS` (gitignored); `build-classpath.sh` now rewrites that
+  file when `APP_ID` is exported instead of keeping an existing dummy, and warns
+  when it is building with `APP_ID=0`.
+- **Sampled JPEG decoding segfaulted the JVM — a skia/libjpeg-turbo mismatch,
+  fixed in atlas.** Every avatar in the chat list took the
+  `ImageLoader$CacheOutTask` → `BitmapFactory.decodeStream` path with
+  `inSampleSize = 2`, and the process died in
+  `jpeg_calc_output_dimensions+0x33`:
+
+  ```
+  C  [libjpeg.so.62+0x45153]  jpeg_calc_output_dimensions+0x33
+  J  android.graphics.BitmapFactory.nativeDecodeStream
+  j  org.telegram.messenger.ImageLoader$CacheOutTask.run()V
+  ```
+
+  `SkJpegCodec::onGetScaledDimensions()` calls that function on a *zeroed*
+  `jpeg_decompress_struct` to have libjpeg do the arithmetic. libjpeg-turbo 3.x
+  (Debian's `libjpeg62-turbo` 3.1.3, `libjpeg.so.62.4.0`) starts it with
+  `mov 0x220(%rbx),%rax; mov 0x14(%rax),%r12d` — `cinfo->master->lossless`,
+  added for lossless JPEG — so it reads through a NULL `master`. Skia's own
+  copy is the 2.x fork without that field, so the fix is one gn arg:
+  `skia_use_system_libjpeg_turbo=false` (atlas `1f8ff0f6 skia: build against the
+  bundled libjpeg-turbo`). This never showed on the device because Ubuntu Touch
+  ships libjpeg-turbo 2.x.
+- **A skia build option only reaches the build if the packagefiles are
+  re-copied.** meson copies `subprojects/packagefiles/skia/` into the checkout
+  once, when it extracts the wrap, and the port's `subprojects/skia` is the
+  shared checkout that was extracted long ago — so an atlas commit to
+  `packagefiles/skia/meson.build` changed nothing until `build-atlas.sh` started
+  copying those files over on every run.
+- **`liblog` was hiding the app's own log.** AOSP's liblog drops anything below
+  `INFO` unless `ANDROID_LOG_TAGS` says otherwise, and `FileLog.d` is exactly
+  where Telegram says what it is doing. `run.sh` now exports
+  `ANDROID_LOG_TAGS=*:V`, so `out/run.log` is the whole picture instead of
+  tgnet's native lines plus a separate `files/logs/*.txt` to correlate by hand.
+  `loaded folderId 0 loadType 1 count 129` (`DIALOGS_LOAD_TYPE_CACHE`) is what
+  `check-chatlist.sh` waits for.
+- **The whole app died on the first SVG it parsed, and the corpse stayed on
+  screen.** A freshly transplanted session froze a few seconds into its update
+  catch-up: no repaints, no input, 0% CPU, `getDifference` never finishing. gdb
+  showed why — a thread inside `JVM_Halt` → `vm_exit`, waiting for a safepoint
+  that never comes, i.e. the JVM was *exiting*, not busy. The chain is:
+
+  1. `SvgHelper.getDrawable(R.raw.topic_bubble)` returns a drawable with **zero
+     commands**, so `ForumBubbleDrawable`'s `copyCommandFromPosition(0)` throws
+     `IndexOutOfBoundsException` (a forum topic in the update stream is enough).
+  2. `BuildVars`' default uncaught-exception handler calls `FileLog.fatal`,
+     which on a `DEBUG_PRIVATE_VERSION` build — which the port's
+     `afatFdX86_64Debug` is — calls `System.exit(2)`.
+  3. atlas's hotspot launcher never returns from the GLib loop, so the exit
+     hangs (the same "does not stop on SIGTERM" symptom the MTProto check saw) and the dead
+     JVM keeps its window up.
+
+  The empty drawable is the actual bug, and it is a JDK/libcore difference:
+  `SvgHelper`'s handler switches on SAX's `localName`, and **Xerces leaves
+  `localName` empty unless the factory is namespace-aware**, while libcore's
+  Expat parser always fills it. Every SVG the app parses was silently becoming
+  an empty drawable. Fixed in the shim with
+  `org.apache.harmony.xml.parsers.SAXParserFactoryImpl` — the class ART installs
+  as the JAXP default — registered through
+  `META-INF/services/javax.xml.parsers.SAXParserFactory` in `shim.jar`, so
+  `SAXParserFactory.newInstance()` picks it up exactly as it does on ART. With
+  it, a cold transplanted session catches up in seconds and the chat list
+  scrolls on the first try; without it the check ran for 10 minutes and never
+  got a frame.
+- **Scrolling is a drag, not a wheel.** atlas installs GLFW cursor and mouse
+  button callbacks but no scroll callback, so `xdotool click 4/5` does nothing;
+  `mousedown` + stepped `mousemove` + `mouseup` is a fling the way a finger
+  makes one. The check requires the window's screenshot to change across the
+  drags, since a frozen UI would otherwise pass silently.
+- **Known, not fixed** (none of it blocks the acceptance path, Non-Goals):
+  - `KeyGenParameterSpec cannot be cast to AlgorithmParameterSpec` —
+    atlas's stub does not implement the JCA interface, so UnifiedPush
+    registration fails on start. One-line atlas fix when notifications matter.
+  - `ClassNotFoundException: android.widget.Editor` /
+    `android.view.View$AttachInfo`, dozens of times: the app reflects into
+    hidden framework internals (`EditTextBoldCursor.init`,
+    `LinkSpanDrawable$LinksTextView.invalidate`) and catches the failure.
+  - `getSystemService: case >batterymanager< is not implemented` (32×).
+
+## Send and receive text messages
+
+- **Opening a chat drew nothing, and one missing stub was why.** Saved Messages
+  opened with its 50 messages loaded from `cache4.db` and its action bar in
+  place, but the message list was empty wallpaper. Every frame died on:
+
+  ```
+  Exception in thread "main" java.lang.NoClassDefFoundError: android/view/ViewStructure
+      at java.base/java.lang.Class.getDeclaredMethods0(Native Method)
+      at android.view.View.overridesOnDraw(View.java:1283)
+      at android.view.View.updateDisplayListIfDirty(View.java:1300)
+      at org.telegram.ui.Cells.ChatMessageCell.draw(ChatMessageCell.java:20050)
+  ```
+
+  atlas asks each view whether it overrides `onDraw` before recording it, and
+  `getDeclaredMethod` makes the runtime resolve the parameter and return types
+  of *every* declared method of that class. `ChatMessageCell` declares
+  `onProvideStructure(ViewStructure)` — for the assist API, which nothing on
+  this platform ever calls — so a class that is never used broke the drawing of
+  the class that is. Fixed in atlas (`a08f4ce0 api-impl: add the classes view
+  signatures name`): `ViewStructure`, `DragEvent`, `TextClassifier` and
+  `WebView.FindListener`, all stubs.
+- **The same trap is now checked at build time.** `tools/ViewSignatureCheck.java`
+  loads every class in `out/classpath/`, keeps the `android.view.View`
+  subclasses (2757 of them) and calls `getDeclaredMethods()` on each — exactly
+  what atlas does before a draw. `build-atlas.sh` runs it next to
+  `PortClassCheck` and fails the build on a hit, so this class of bug cannot
+  come back silently in the emoji check. It also reports, without failing, views that do
+  not verify at all: `AIEditorAlert$Tabs` is one, because atlas's
+  `android.widget.ScrollView` extends `ViewGroup` where the SDK's extends
+  `FrameLayout`. Not on this story's path, so left alone (Non-Goals).
+- **Saved Messages is the only chat the check may write to**, and it proves that
+  before typing rather than after: `check-messages.sh` reads the account's own
+  user id out of the log (`getSharedPreferences(ringtones_pref_<id>)`, which
+  `MediaDataController` asks for at startup), requires the overflow menu to
+  visibly open before clicking its third item, and then waits for
+  `MessageLoaderLogger dialogId=<self>` before it types a character. A click
+  that lands on the dialog list instead would open somebody's chat; the script
+  goes back and retries, and gives up without sending anything.
+- **What the round trip looks like in `run.log`:**
+
+  ```
+  send message user_id = 0 chat_id = 0 channel_id = 0    <- inputPeerSelf
+  send request ...TL_messages_sendMessage with token = 50
+  req -> TL_messages_sendMessage : {...}
+  res -> TL_updates : {"updates":[{"..._":"...TL_updateMessageID","id":222004,
+                                   "random_id":929001271602019302}, ...
+  process update TL_updateMessageID
+  ```
+
+  `updateMessageID` is the ack the story asks for: it is what replaces the
+  local negative id with the server's, i.e. the clock turning into a check
+  mark. The text itself is not in the log — liblog truncates the request JSON
+  well before it — so the check matches on the request/response pair, not on
+  the message body.
+- **The incoming half rides on the account's own traffic.** A self-send does
+  *not* come back through the update loop: the server answers the RPC with the
+  updates and the app applies that `pts` itself, so a later push for the same
+  message is dropped. A deterministic incoming message would need a second
+  client on the account (the ART/ATL desktop build is one, but running both at
+  once on one auth key is its own experiment). What the check requires instead
+  is a real `updateNewMessage`/`updateNewChannelMessage` processed while the app
+  keeps running, plus the dialog list visibly redrawing because of it. On this
+  account that arrives within seconds; `--incoming-seconds` (default 300) is the
+  bound.
+- **A failed check used to leave the app running.** `pkill -f` sends SIGTERM,
+  which this launcher ignores, so every aborted run left an instance
+  talking to the account — and the next `build-atlas.sh` failed with `Text file
+  busy` on the launcher binary. `check-messages.sh` kills with `-9`.
+
+## Emoji panel
+
+- **The panel opened and the grid was empty.** The emoji button worked, the
+  sections drew ("Trending Emoji Packs", "Recently Used", "Emoji & People"),
+  the rows had the right height — and not one glyph appeared. No exception
+  anywhere in `run.log`, and only five `assets/emoji/*.png` reads in the whole
+  run (the trending-pack previews, which go through `ImageReceiver`, not
+  through this path).
+- **The cause was in atlas's `ImageView.onDraw`**, which skipped any drawable
+  whose intrinsic size is unset:
+
+  ```java
+  int contentWidth = contentWidth();   // max(0, drawable.getIntrinsicWidth())
+  if (innerWidth <= 0 || innerHeight <= 0 || contentWidth <= 0 || contentHeight <= 0)
+      return;
+  ```
+
+  `Drawable.getIntrinsicWidth()` is -1 unless a subclass overrides it, and
+  `Emoji.SimpleEmojiDrawable` does not: it draws whatever `getBounds()` says.
+  AOSP's `ImageView.configureBounds()` treats that case as "stretch over the
+  whole view and ignore the scale type", so on Android the cell's own size is
+  what the emoji is drawn at. atlas returned instead, which is why nothing was
+  painted and why `SimpleEmojiDrawable.draw` never ran to ask for its sprite.
+  Fixed in atlas (`api-impl: draw drawables that have no intrinsic size`).
+  Every `ImageView` holding a bounds-driven drawable was affected, not only the
+  emoji grid.
+- **`setImageResource(0)` killed the app while the panel was open**, but only
+  when the sticker requests came back during the run — `Resources$NotFoundException:
+  Resource ID #0x0` out of `StickerCategoriesListView$CategoryButton.set`, which
+  calls `setImageResource(0)` on purpose to clear the icon of a remote category
+  before fetching it. AOSP treats id 0 as "no image" (`resolveUri()` returns
+  early); atlas went straight to `BitmapFactory.decodeResource` and threw, and
+  an uncaught exception in this build is `System.exit(2)`. Fixed in atlas
+  (`api-impl: let setImageResource(0) clear the image`). Worth remembering that
+  a network answer, not a click, is what surfaced it: the first run of the same
+  check passed without ever touching that code.
+- **The absence of asset reads was the useful clue.** `Emoji.loadEmoji` is
+  called from `SimpleEmojiDrawable.draw` itself, so "the grid drew but the
+  sprites are missing" and "the grid never drew" look identical on screen and
+  differ completely in the log: atlas logs every `AssetManager_openAsset`, and
+  `assets/emoji/<page>_<index>.png` reads only happen when a glyph is actually
+  being painted. `check-emoji.sh` uses that as its evidence that the sprite
+  sheets render (111 distinct glyphs on the first screenful).
+- **The panel is as tall as a phone keyboard**, which on a 960x540 window means
+  it covers the chat entirely: the message list is pushed off the top and only
+  the input row stays visible. That is the layout being asked for, not a port
+  bug — the popup height comes from the saved keyboard height. `check-emoji.sh`
+  therefore closes the panel again (the emoji button is at the top of the window
+  in that layout) before it looks at the input field or sends, and falls back to
+  sending from the panel layout if the close does not take.
+- **The sent text is read out of `cache4.db`, not off a screenshot** — a
+  screenshot cannot tell an emoji from a placeholder circle. The check types
+  `mg-us014-<timestamp>`, taps a glyph and then requires the marker to be
+  followed by a non-ASCII character in the stored `TLRPC.Message` blob. The row
+  is normally still in `cache4.db-wal` when the app exits, so both files have to
+  be searched; and GNU grep in a UTF-8 locale will not find an ASCII pattern in
+  a file with invalid UTF-8 around it, so this is done in Python on bytes.

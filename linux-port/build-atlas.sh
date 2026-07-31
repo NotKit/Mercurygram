@@ -50,6 +50,15 @@ if [ ! -e "$ATLAS_DIR/subprojects/skia" ]; then
 	echo "linked subprojects/skia -> $ATLAS_SKIA_DIR"
 fi
 
+# meson copies subprojects/packagefiles/skia/ into the checkout once, when it
+# extracts the wrap, and the shared checkout was extracted long ago. Copy them
+# again when atlas changes them, or a skia build option committed on the atlas
+# branch would never reach the build.
+for f in "$ATLAS_DIR"/subprojects/packagefiles/skia/*; do
+	dst="$ATLAS_DIR/subprojects/skia/$(basename "$f")"
+	cmp -s "$f" "$dst" || { cp "$f" "$dst"; echo "updated subprojects/skia/$(basename "$f")"; }
+done
+
 # builddir-relative source | destination name | ninja target | required
 artifacts=(
 	"src/api-impl/hax.jar|api-impl.jar|src/api-impl/hax.jar|yes"
@@ -230,6 +239,13 @@ if [ -d "$PORT_OUT/classpath" ]; then
 		org.telegram.messenger.ApplicationLoader \
 		org.telegram.ui.LaunchActivity \
 		org.telegram.ui.IntroActivity
+
+	# Views whose method signatures name a class api-impl lacks: atlas asks
+	# every view for its declared methods before drawing it, so one missing
+	# parameter type kills the frame, not just that method.
+	"$JAVA_HOME/bin/javac" -d "$PORT_OUT/tools" "$PORT_DIR/tools/ViewSignatureCheck.java"
+	"$JAVA_HOME/bin/java" -cp "$PORT_OUT/tools:$ATLAS_OUT/api-impl.jar:$PORT_OUT/shim.jar:$PORT_OUT/classpath/*" \
+		ViewSignatureCheck "$PORT_OUT"/classpath/*.jar
 else
 	echo "note: out/classpath/ is missing, skipping the app class-resolution check" \
 		"(run build-classpath.sh)"

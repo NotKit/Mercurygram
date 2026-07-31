@@ -34,7 +34,9 @@ echo "compiling ${#sources[@]} shim classes with $(javac -version 2>&1)"
 # The shim only ever compiles against the JDK: it must not grow a dependency on
 # api-impl, or the split between framework and runtime stops being real.
 javac --release 21 -Xlint:-options -implicit:none -d "$CLASSES" "${sources[@]}"
-jar --create --file "$SHIM_JAR" -C "$CLASSES" .
+# resources/ holds the service registrations that make a shim the platform
+# default, the way libcore's are on ART (see shim/README.md).
+jar --create --file "$SHIM_JAR" -C "$CLASSES" . -C "$SHIM_DIR/resources" .
 
 # --- JNI back end -----------------------------------------------------------
 echo "building $(basename "$SHIM_LIB")"

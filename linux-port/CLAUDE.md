@@ -130,10 +130,11 @@
   works on the real app. `check-mtproto.sh` is the worked example — positions
   are per-mille of the ATLWindow, and the log, not a screenshot, is what tells
   the script whether a step took.
-- The port builds with `APP_ID=0` (dummy `./API_KEYS`), so Telegram answers
-  every request that opens a connection with `400 CONNECTION_API_ID_INVALID`.
-  That is enough to prove a round trip, never enough to log in — export
-  `APP_ID`/`APP_HASH` and re-run `build-classpath.sh` first.
+- Real `APP_ID`/`APP_HASH` are a build input: `APP_ID=... APP_HASH=...
+  build-classpath.sh` rewrites the gitignored `./API_KEYS`. With the dummy
+  `APP_ID=0`, Telegram answers every request that opens a connection with
+  `400 CONNECTION_API_ID_INVALID` — enough to prove a round trip, never enough
+  to use a session.
 - Backgrounding a shell *function* that runs the launcher makes `$!` the
   subshell's pid, and killing that orphans the launcher. `exec` the binary
   inside the function (`run.sh`). The launcher also ignores SIGTERM, so a timed
@@ -141,3 +142,53 @@
 - `pgrep -f android-translation-layer-hotspot` matches the shell you type it in
   too. Anchor the pattern (`^/…/android-translation-layer-hotspot `) before
   killing anything.
+- The app's data dir is `$ANDROID_APP_DATA_DIR/<apk basename>_` (atlas appends
+  it), so the port's is `out/data/app.apk_`. `transplant-session.sh` copies a
+  logged-in ART/ATL session into it; `run.sh --fresh` wipes it and re-running
+  the transplant puts it back.
+- `run.sh` exports `ANDROID_LOG_TAGS=*:V`, without which liblog drops everything
+  below `INFO` and the app's own `FileLog.d` lines never reach `out/run.log`.
+  Check app behaviour there, not in `files/logs/*.txt`.
+- atlas has no GLFW scroll callback: a list is scrolled with a drag
+  (`mousedown` + stepped `mousemove` + `mouseup`), never `xdotool click 4/5`.
+  See `check-chatlist.sh`.
+- A gn option for skia lives in `$ATLAS_DIR/subprojects/packagefiles/skia/`, and
+  meson only copies that into the (shared, long-extracted) skia checkout when it
+  first extracts the wrap — `build-atlas.sh` re-copies it on every run so an
+  atlas commit there actually takes effect.
+- The port's build is a `DEBUG_PRIVATE_VERSION`, so `FileLog.fatal` answers any
+  uncaught exception with `System.exit(2)` — and the launcher hangs in the exit,
+  leaving a dead JVM with its window still up (0% CPU, no repaints, no input).
+  "The UI froze" means "read `files/logs/*.txt` for `FATAL/tmessages`"; `run.sh`
+  fails the run on it.
+- App code written for Android can depend on libcore *behaviour*, not just
+  classes: `SvgHelper` switches on SAX's `localName`, which Xerces leaves empty
+  unless the parser is namespace-aware. Such a fix goes in the shim as the class
+  ART uses (`org.apache.harmony.xml.parsers.SAXParserFactoryImpl`), registered
+  through `shim/resources/META-INF/services/`, never as an edit to
+  `org/telegram/**`.
+- `run.sh --stop-file PATH` turns `--seconds` into an upper bound, so a driving
+  check can wait for a slow first sync without paying for it on every run.
+- A view's *method signatures* must resolve, not just its code: atlas calls
+  `getDeclaredMethod("onDraw", …)` on every view before drawing it, and that
+  loads the parameter and return types of all its declared methods. One missing
+  class (`ChatMessageCell.onProvideStructure(ViewStructure)`) makes the whole
+  frame die with `NoClassDefFoundError` while the app looks merely empty.
+  `tools/ViewSignatureCheck.java`, run by `build-atlas.sh`, fails the build on
+  it; add the stub in `$ATLAS_DIR`.
+- `pkill -f "$launcher "` is not enough to stop the app — the launcher ignores
+  SIGTERM, and the orphan keeps talking to the account and holds the binary
+  busy. Use `pkill -9`.
+- Anything that drives the UI must prove *which* chat is open before it types:
+  the account's own user id comes out of the log
+  (`getSharedPreferences(ringtones_pref_<id>)`), and Saved Messages is the only
+  dialog a check may write to.
+- atlas's `ImageView` is not AOSP's: it had no handling for a drawable with no
+  intrinsic size (AOSP stretches it over the whole view; atlas drew nothing —
+  every emoji cell) and none for `setImageResource(0)` (AOSP clears the image;
+  atlas threw `Resources$NotFoundException`). Before blaming app code for a view
+  that stays empty, read the atlas widget it uses and compare it with AOSP's.
+- A framework gap can be surfaced by a *network answer* rather than by a click,
+  so a UI check that passes once is not proof. `check-emoji.sh` found
+  `setImageResource(0)` only on the run where `getAllStickers` came back while
+  the panel was open — re-run a driving check before believing it.

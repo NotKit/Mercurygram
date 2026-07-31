@@ -192,6 +192,28 @@ public class ShimCheck {
 			} catch (org.json.JSONException expected) {
 			}
 		});
+		check("SAX reports localName like libcore's Expat parser", () -> {
+			javax.xml.parsers.SAXParserFactory factory =
+			    javax.xml.parsers.SAXParserFactory.newInstance();
+			expect(factory instanceof org.apache.harmony.xml.parsers.SAXParserFactoryImpl,
+			       "newInstance() did not pick up the shim's service registration: "
+			           + factory.getClass().getName());
+			// what SvgHelper does: default (non-namespace-aware) factory, and a
+			// content handler that switches on localName
+			org.xml.sax.XMLReader reader = factory.newSAXParser().getXMLReader();
+			java.util.List<String> names = new java.util.ArrayList<>();
+			reader.setContentHandler(new org.xml.sax.helpers.DefaultHandler() {
+				@Override
+				public void startElement(String uri, String localName, String qName,
+				                         org.xml.sax.Attributes attributes) {
+					names.add(localName + "/" + qName + "/" + attributes.getValue("d"));
+				}
+			});
+			reader.parse(new org.xml.sax.InputSource(new StringReader(
+			    "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0,0\"/></svg>")));
+			expect(names.equals(java.util.List.of("svg/svg/null", "path/path/M0,0")),
+			       "localName, qName or an attribute went missing: " + names);
+		});
 		check("libcore.util.NativeAllocationRegistry frees the peer", () -> {
 			long freeFunction = libcore.util.NativeAllocationRegistry.SelfTest.freeFunction();
 			long before = libcore.util.NativeAllocationRegistry.SelfTest.freeCalls();

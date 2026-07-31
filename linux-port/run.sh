@@ -5,8 +5,12 @@
 # sequence: Context.createApplication -> ContentProvider.createContentProviders
 # -> Application.onCreate -> Activity.createMainActivity -> GLib main loop.
 #
-# Usage: linux-port/run.sh [--seconds N] [--data-dir DIR] [--fresh] [--gpu] [-- ARGS...]
+# Usage: linux-port/run.sh [--seconds N] [--stop-file PATH] [--data-dir DIR]
+#                          [--fresh] [--gpu] [-- ARGS...]
 #   --seconds N   quit after N seconds and check run.log (0 = run until closed)
+#   --stop-file   with --seconds, quit as soon as this file appears; the timeout
+#                 becomes the maximum. Lets a driving script end the run when it
+#                 is done instead of waiting out a worst-case timeout.
 #   --data-dir    app data dir; default out/data, kept between runs
 #   --fresh       wipe the data dir first (a first-launch run)
 #   --gpu         leave ATL_NO_GPU unset (see BRINGUP_NOTES.md: Ganesh crashes
@@ -20,6 +24,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 source "$PORT_DIR/launcher/display.sh"
 
 seconds=0
+stop_file=""
 data_dir="${ANDROID_APP_DATA_DIR:-$PORT_OUT/data}"
 fresh=0
 gpu=0
@@ -28,6 +33,7 @@ extra_args=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--seconds) seconds="$2"; shift 2 ;;
+	--stop-file) stop_file="$2"; shift 2 ;;
 	--data-dir) data_dir="$2"; shift 2 ;;
 	--fresh) fresh=1; shift ;;
 	--gpu) gpu=1; shift ;;
@@ -60,6 +66,11 @@ export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_
 # ever returns a context, on llvmpipe and on hardware GL alike. --gpu to retry.
 [ "$gpu" = 1 ] || export ATL_NO_GPU=1
 
+# liblog drops anything below INFO by default, which is most of the app's own
+# logging (FileLog.d). With this, run.log is the whole picture instead of just
+# tgnet's native lines plus the app's separate files/logs/ files.
+export ANDROID_LOG_TAGS="${ANDROID_LOG_TAGS:-*:V}"
+
 port_start_display
 
 run_launcher() {
@@ -86,15 +97,28 @@ if [ "$seconds" = 0 ]; then
 	exit "${PIPESTATUS[0]}"
 fi
 
-echo "running Mercurygram for ${seconds}s, log in $log"
+if [ -n "$stop_file" ]; then
+	rm -f "$stop_file"
+	echo "running Mercurygram for up to ${seconds}s (until $stop_file), log in $log"
+else
+	echo "running Mercurygram for ${seconds}s, log in $log"
+fi
 status=0
+started_marker="$PORT_OUT/.run-started"
+touch "$started_marker"
 run_launcher >"$log" 2>&1 &
 launcher_pid=$!
 
-# Screenshot two seconds before the end, so the UI has had the whole run to draw.
-sleep $((seconds > 2 ? seconds - 2 : 1))
+# The screenshot is the last thing before the kill, so the UI has had the whole
+# run to draw.
+waited=0
+while [ "$waited" -lt "$((seconds * 2))" ]; do
+	[ -n "$stop_file" ] && [ -e "$stop_file" ] && break
+	kill -0 "$launcher_pid" 2>/dev/null || break
+	sleep 0.5
+	waited=$((waited + 1))
+done
 port_screenshot "$shots/run.png"
-sleep 2
 # SIGTERM first, but do not leave a launcher behind if it ignores it: the next
 # build would fail to overwrite the running binary.
 kill "$launcher_pid" 2>/dev/null || true
@@ -146,6 +170,19 @@ uncaught=$(grep -cE '^(error: exception during|Exception in thread|uncaught exce
 	exit 1
 }
 
-echo "run ok: booted to the main activity, no uncaught exceptions in ${seconds}s"
+# The app's own verdict. BuildVars installs an uncaught-exception handler that
+# writes FATAL and, on this DEBUG_PRIVATE_VERSION build, calls System.exit(2) --
+# which the launcher hangs in, leaving a dead JVM with its window still up. That
+# looks like a frozen app here and like nothing at all in run.log, so the check
+# is the app's log file.
+mapfile -t app_logs < <(find "$data_dir" -path '*/files/logs/*.txt' -newer "$started_marker" \
+	! -name '*_net.txt' ! -name '*_mtproto.txt' 2>/dev/null)
+if [ "${#app_logs[@]}" -gt 0 ] && grep -q 'FATAL/tmessages' "${app_logs[@]}"; then
+	echo "the app hit a fatal exception (and killed itself):" >&2
+	grep -h -A 12 'FATAL/tmessages' "${app_logs[@]}" | head -30 >&2
+	exit 1
+fi
+
+echo "run ok: booted to the main activity, no uncaught exceptions in $((waited / 2))s"
 [ -f "$shots/run.png" ] && echo "screenshot: $shots/run.png"
 exit 0
