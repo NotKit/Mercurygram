@@ -35,7 +35,7 @@ atlas android-translation-layer-hotspot
         |
         |  classpath
         +--> out/atlas/api-impl.jar        atlas Android framework (javac, pre-dex)
-        +--> out/shim/shim.jar             libcore/dalvik classes HotSpot lacks
+        +--> out/shim.jar                  libcore/dalvik classes HotSpot lacks
         +--> out/classpath/*.jar           Mercurygram + androidx/runtime deps
         |
         |  System.load from Java
@@ -51,6 +51,7 @@ atlas android-translation-layer-hotspot
 | Path | Contents |
 | --- | --- |
 | `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `PORT_OUT`); source it, don't run it |
+| `build-all.sh` | every build step below, in dependency order — the one-command build |
 | `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on branch `mercurygram/openjdk-port`, gitignored here |
 | `build-atlas.sh` | builds atlas from `atlas/` into `out/atlas-build/`, installs `out/atlas/` |
 | `check-env.sh` | toolchain smoke test; exits 0 when the environment is usable |
@@ -74,23 +75,48 @@ atlas android-translation-layer-hotspot
   `/usr/lib/jvm/java-21-openjdk-amd64` unless `JAVA_HOME`/`JAVA_21_HOME` says
   otherwise. Newer JDKs are deliberately not used: the toolchain is pinned so
   every build step sees the same runtime.
-- Host toolchain: `cc`, `c++`, `cmake`, `make`, `ninja`, `pkg-config`, `unzip`.
-- An atlas checkout at `linux-port/atlas` (see below) plus `meson`, `ninja`, and
-  `gn` + `clang` for its skia subproject: the port builds atlas itself, it is not
-  a prebuilt dependency. atlas's own dependencies (`art-standalone`, GTK4, GLFW,
+- Host toolchain: `cc`, `c++`, `cmake`, `make`, `ninja`, `pkg-config`, `unzip`,
+  plus `nasm` (dav1d) and `yasm` (libvpx) for the native dependencies.
+- An atlas checkout at `linux-port/atlas` (`build-all.sh` clones it when it is
+  missing; see *atlas source checkout*) plus `meson`, `ninja`, and `gn` +
+  `clang` for its skia subproject: the port builds atlas itself, it is not a
+  prebuilt dependency. atlas's own dependencies (`art-standalone`, GTK4, GLFW,
   the AOSP support libraries in `/usr/local/lib/art`) must already be installed.
 - A Wayland or X11 session for the run steps. `ATL_GLFW_PLATFORM` forces the
-  GLFW backend; `ATL_NO_GPU=1` falls back to CPU raster.
+  GLFW backend; `ATL_NO_GPU=1` falls back to CPU raster. Without a session the
+  run scripts start an `Xvfb` themselves — that needs `Xvfb` and ImageMagick's
+  `import` for the screenshots, and the driving checks need `xdotool`.
+- `check-env.sh` verifies all of the above except the run-time extras.
 
 ## Usage
 
 ```sh
-source linux-port/env.sh     # environment for any manual step
-linux-port/check-env.sh      # verify the toolchain first
+linux-port/build-all.sh      # build everything, ~1 min incremental
+linux-port/run.sh            # start Mercurygram
 ```
 
-`linux-port/run.sh` launches the app (see *Running the app* below);
-`build-all.sh`, the one-command build of everything, comes later.
+That is the whole port: `build-all.sh` runs the steps of the following sections
+in dependency order and `run.sh` boots the app. For a logged-in session, run
+`transplant-session.sh` once in between (see *Chat list with an existing
+session*).
+
+```sh
+source linux-port/env.sh          # environment for any manual step
+linux-port/check-env.sh           # verify the toolchain on its own
+linux-port/build-all.sh --list    # the steps, with the story each belongs to
+linux-port/build-all.sh --clean   # rebuild everything from scratch (~7 min)
+linux-port/build-all.sh --from atlas   # resume after a failed step
+linux-port/build-all.sh --only shim    # just one step
+```
+
+`build-all.sh` starts from a bare checkout: it initializes the four native
+submodules and clones `linux-port/atlas` when it is missing (`ATLAS_URL`,
+`ATLAS_BRANCH` override the source). Every step is one of the scripts below and
+all of them are idempotent, so re-running the whole thing is an incremental
+pass, not a rebuild. Order matters in two places: libvpx before ffmpeg, and the
+framework before the shim — the shim compiles against `api-impl.jar`, so
+`build-atlas.sh` skips its app class-resolution checks on a first build and the
+final `checks` step comes back to them once `out/shim.jar` exists.
 
 ### Native dependencies
 
@@ -565,3 +591,108 @@ The panel is as tall as a phone keyboard, so on a 960x540 window it covers the
 chat; the check closes it again before sending. See `BRINGUP_NOTES.md` for the
 framework bug this story found (`ImageView` dropped drawables with no intrinsic
 size, which is every emoji cell).
+
+## Known limitations
+
+Parity with the ART/ATL desktop status is the bar: login, chat list, text
+messages, emoji panel. What is knowingly missing:
+
+- **No calls and no voice messages.** `jni/voip/` (tgcalls, webrtc, libtgvoip)
+  is not built and OpenSL ES is a no-op stub, so recording and playback do
+  nothing. Same for `whisper` transcription and the `tde2e` bridge, whose
+  submodules are not checked out — their JNI methods raise
+  `UnsatisfiedLinkError` if something reaches them.
+- **CPU raster only.** `run.sh` exports `ATL_NO_GPU=1`: atlas's Ganesh path
+  segfaults inside skia's `GrGLExtensions::init` on every GL driver on this
+  machine, hardware and llvmpipe alike. `--gpu` reproduces it.
+- **x86_64 glibc only.** arm64 and Ubuntu Touch click packaging are the next
+  phase, as is the GraalVM native image (below).
+- **Debug build.** `afatFdX86_64Debug` is the only usable variant, because R8
+  renames the classes the launcher and the shims name. It is a
+  `DEBUG_PRIVATE_VERSION`, so the app answers any uncaught exception with
+  `System.exit(2)` instead of carrying on.
+- **Screen-size assumptions.** The window is a phone-sized 960x540 by default;
+  the emoji panel is as tall as a phone keyboard and covers the chat, and the
+  intro page sits off-centre. Cosmetic atlas layout gaps, not port bugs.
+- **One atlas gap left on purpose:** `AIEditorAlert$Tabs` does not verify,
+  because atlas's `ScrollView` extends `ViewGroup` where the SDK's extends
+  `FrameLayout`. `build-atlas.sh` reports it without failing — it is off the
+  parity path (see `BRINGUP_NOTES.md`).
+- Camera, hardware video decode, `SurfaceView`, notifications/UnifiedPush: atlas
+  gaps, out of scope here.
+- **Never run the ART build and this port at the same time** — both would use
+  the same auth key against Telegram.
+
+## GraalVM native-image tracing agent
+
+The next phase after this port is a native image, which needs a reachability
+profile of a real run. The launcher forwards `-X "OPTION"` straight to the JVM,
+so the tracing agent attaches without any change to the port:
+
+```sh
+JAVA_HOME=/path/to/graalvm-jdk-21 linux-port/build-atlas.sh
+JAVA_HOME=/path/to/graalvm-jdk-21 linux-port/run.sh --seconds 120 -- \
+    -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/native-image-config"
+```
+
+Three things to know:
+
+- The agent ships with GraalVM, not with the OpenJDK the port pins, so
+  `JAVA_HOME` has to point at a **GraalVM 21** build — `env.sh` keeps any
+  `JAVA_HOME` that reports 21.x. `build-atlas.sh` stamps the builddir with the
+  JDK it used and reconfigures when that changes, which means a skia rebuild
+  (~2 min); switching back does the same.
+- The agent records only what a run actually touches, and this stack is
+  reflection-heavy in places a boot does not reach: atlas resolves every view's
+  declared methods before drawing it, and the app looks up TL classes by name.
+  Drive the checks (`check-chatlist.sh`, `check-messages.sh`, `check-emoji.sh`)
+  under the agent and merge their configs rather than trusting one idle run.
+- `-X` is also how to pass anything else HotSpot-specific (`-Xmx`,
+  `-XX:+UseSerialGC`); `JDWP_LISTEN=<port>` and `ATL_CHECK_JNI=1` are launcher
+  environment variables for the debugger and for `-Xcheck:jni`.
+
+## The atlas commit this port needs
+
+atlas is built from `linux-port/atlas/`, branch **`mercurygram/openjdk-port`**,
+at commit **`8f8cb36e`** ("graphics: back ComposeShader with skia's blend shader").
+Every build records what it used in `out/atlas/ARTIFACTS.md` and
+`out/atlas/artifacts.env`.
+
+The branch carries the HotSpot launcher and the framework fixes this bring-up
+needed, all written to be upstreamable to atl-touch:
+
+```
+087b14a5 atl: use the runtime's own timezone database when it has the zone
+e0f44b8d api-impl: build against the JDK's java.*, not libcore's
+21133ad5 api-impl: hand the attribute buffers to JNI instead of raw addresses
+fce22823 add a launcher for running apps on a stock JVM
+b70ac451 hotspot launcher: add --run-class
+8d0b815e atl: keep libcore out of ATLTimeZone until it is needed
+d9d18822 api-impl: make the nested classes apps instantiate static
+d09b2892 api-impl: add the constructors apps call
+ae5c570e api-impl: add AccessibilityRecord and AccessibilityEvent
+2bb3f5fd graphics: add the API 29+ drawing classes as stubs
+a33bf47d api-impl: add the audio device callback API
+6ca968d0 api-impl: add Notification.CallStyle, KeyProperties and the backup helpers
+e04de078 hotspot launcher: stop the boot on the first exception
+1f8ff0f6 skia: build against the bundled libjpeg-turbo
+a08f4ce0 api-impl: add the classes view signatures name
+a4e2a120 api-impl: draw drawables that have no intrinsic size
+aea000e9 api-impl: let setImageResource(0) clear the image
+45253f2b api-impl: stop TextView applying its gravity twice
+8f8cb36e graphics: back ComposeShader with skia's blend shader
+```
+
+They sit on top of atl-touch master; the commits below `087b14a5` (`fa0be5ad`
+and the desktop work before it) are the state this port started from.
+
+The branch is pushed to atl-touch
+(`git@github.com:NotKit/atl-touch.git`), which is where `build-all.sh` clones it
+from on a machine that has no atlas checkout. Keep it that way after a framework
+fix:
+
+```sh
+git -C linux-port/atlas commit -am "api-impl: ..."
+linux-port/build-atlas.sh && linux-port/run.sh --seconds 25
+git -C linux-port/atlas push origin mercurygram/openjdk-port
+```

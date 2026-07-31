@@ -192,3 +192,12 @@
   so a UI check that passes once is not proof. `check-emoji.sh` found
   `setImageResource(0)` only on the run where `getAllStickers` came back while
   the panel was open — re-run a driving check before believing it.
+- `build-all.sh` is the port's build order, written down: every build script
+  belongs to one of its steps, so a new one has to be added there too. It starts
+  from a bare checkout (submodule init, atlas clone) and every step is
+  idempotent, which is what makes a re-run cheap.
+- The framework and the shim depend on each other: the shim compiles against
+  `out/atlas/api-impl.jar`, while `build-atlas.sh`'s app class checks
+  (`PortClassCheck`, `ViewSignatureCheck`) need `out/shim.jar` — the app's own
+  classes name `org.json`. `build-atlas.sh` therefore skips those checks while
+  the shim is missing, and `build-all.sh` re-runs it after `build-shim.sh`.

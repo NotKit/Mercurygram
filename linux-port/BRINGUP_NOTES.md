@@ -708,3 +708,82 @@ symptom → fix; atlas commits are on `mercurygram/openjdk-port`.
   is normally still in `cache4.db-wal` when the app exits, so both files have to
   be searched; and GNU grep in a UTF-8 locale will not find an ASCII pattern in
   a file with invalid UTF-8 around it, so this is done in Python on bytes.
+
+## One-command build
+
+- **`build-all.sh` is the build order written down**, from a bare checkout to a
+  runnable app: submodule init and the atlas clone, the four native
+  dependencies, `libtmessages.so`, the app class path, atlas (framework and
+  launcher), the shim, then the checks. `--from`/`--only` resume a failed run,
+  `--clean` rebuilds everything. Clean run 416s on 12 cores (Gradle 178s, atlas
+  111s including skia), incremental re-run 57s.
+- **The framework and the shim need each other**, which is the one ordering
+  problem worth recording. `build-shim.sh` compiles against
+  `out/atlas/api-impl.jar`, so atlas has to be built first; but
+  `build-atlas.sh`'s app class checks (`PortClassCheck`, `ViewSignatureCheck`)
+  load app classes whose signatures name `org.json`, which lives in the shim —
+  without `out/shim.jar` the check reports ten views as broken. It is a
+  bootstrap, not a cycle: `build-atlas.sh` now skips those two checks while the
+  shim is missing and says so, and `build-all.sh`'s last step re-runs it (an
+  incremental no-op for the build itself) once the shim exists. Proven by
+  deleting `out/shim.jar` and running `build-all.sh --from atlas`.
+- **`check-env.sh` no longer fails when `subprojects/skia` is missing.** Sharing
+  the ~8 GB tree is an optimisation on this machine; a fresh clone has no tree
+  to share and meson downloads the wrap, so the missing symlink is a note.
+- The atlas branch `mercurygram/openjdk-port` is pushed to atl-touch
+  (`git@github.com:NotKit/atl-touch.git`), 19 commits on top of the desktop
+  work, ending at `8f8cb36e`. `linux-port/README.md` records that commit, and
+  `build-all.sh` clones from there when `linux-port/atlas` is missing.
+- **GraalVM tracing agent**: the launcher already forwards `-X "OPTION"` to the
+  JVM (`--extra-jvm-option`), so `run.sh -- -X "-agentlib:native-image-agent=…"`
+  is all the next phase needs — with `JAVA_HOME` pointing at a GraalVM 21, since
+  the agent ships with GraalVM and `env.sh` accepts any 21.x. Switching JDKs
+  re-stamps the atlas builddir and costs a skia rebuild.
+
+## Visual bugs the running app showed
+
+- **Every centred `TextView` drew its text flush right** — the labels under the
+  main tab icons (Chats, Contacts, Settings, Profile) and the name and
+  phone/username under the avatar in Settings, all of which are plain
+  `TextView`s with `Gravity.CENTER` and `MATCH_PARENT` width. Nothing to do with
+  RTL, which is what it looks like: `StaticLayout.getParagraphDirection(0)` is
+  `+1` for those strings and the shim's `android.icu.text.Bidi` over
+  `java.text.Bidi` reports the paragraph level correctly.
+- **The gravity was applied twice.** atlas's `TextView.onDraw` translates the
+  canvas by `getLayoutOffsetX()`, which offsets by the horizontal gravity
+  against the *text's* measured width; the layout it then draws was built with
+  `getLayoutAlignment()`, which derives `ALIGN_CENTER`/`ALIGN_RIGHT` from the
+  same gravity. For "Chats" in a 300px layout the alignment already puts line 0
+  at 107px, and the offset added another 107. Fixed in atlas (`api-impl: stop
+  TextView applying its gravity twice`) by offsetting by the layout's width,
+  which is 0 unless the layout is narrower than the view — the case the offset
+  exists for, since the layout is built during measure and never rebuilt on
+  resize.
+- **It appeared with the desktop changes this port started from** (`fa0be5ad`),
+  which made `View.getTextAlignment()` return `TEXT_ALIGNMENT_GRAVITY` instead
+  of a constant 0. Until then every layout came out `ALIGN_NORMAL` and the
+  offset in `onDraw` was the only thing placing text, so upstream ATL never drew
+  it twice. Worth remembering when comparing this port against ATL: a bug that
+  is "not in ATL" can still be atlas's, in code the port is the first to reach.
+- **Black bands around the action bar and the message input bar.** In a chat
+  the wallpaper stopped at the action bar and again above the input bar, and the
+  gaps around both islands were pure black (19 black rows in a column through
+  the window; none after the fix). The same drawables fade the profile header.
+- **`ComposeShader` was an empty stub in atlas**, so its `native_instance`
+  stayed 0, `Paint.getNativeInstance()` passed 0 to `nSetShader` and skia drew
+  with the paint's own colour — an unset `Paint` is opaque black. Telegram's
+  `blur3` fade (`BlurredBackgroundWithFadeDrawable`) composes the wallpaper's
+  `BitmapShader` with a `LinearGradient` alpha mask through
+  `ComposeShader(..., DST_IN)`, so every fade became a black rect. Fixed in
+  atlas (`graphics: back ComposeShader with skia's blend shader`) with
+  `SkShaders::Blend`, whose (mode, dst, src) argument order is exactly
+  ComposeShader's A-is-dst/B-is-src contract.
+- **A compose shader cannot be built once and cached.** Callers set the
+  *children's* local matrices after composing them (the fade sets the gradient's
+  matrix per draw to place the fade), so `ATLShader::effective()` rebuilds the
+  blend from its children each time it is asked. `Paint` already re-reads
+  `effective()` on every draw for exactly this reason.
+- `ComposeShader` is used in six more places in the app (`ImageReceiver`,
+  `MotionBackgroundDrawable`, `MotionBackgroundPaint` — which nests it three
+  deep — and `LoadingStickerDrawable`), all with `DST_IN` gradient masks, so
+  more than the fades were flat black before this.

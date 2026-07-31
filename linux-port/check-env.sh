@@ -32,9 +32,14 @@ ok "atlas: $ATLAS_DIR on $atlas_branch ($(git -C "$ATLAS_DIR" rev-parse --short 
 	echo "note: atlas is on '$atlas_branch', the port's branch is mercurygram/openjdk-port"
 
 # skia is shared between checkouts; building it from scratch is the one long step.
-[ -f "$ATLAS_DIR/subprojects/skia/BUILD.gn" ] ||
-	fail "no skia sources at $ATLAS_DIR/subprojects/skia (symlink ATLAS_SKIA_DIR=$ATLAS_SKIA_DIR there)"
-ok "atlas skia: $(readlink -f "$ATLAS_DIR/subprojects/skia")"
+# Without a tree to share, meson downloads the wrap (~8 GB) on the first build,
+# so this is a note and not a failure.
+if [ -f "$ATLAS_DIR/subprojects/skia/BUILD.gn" ]; then
+	ok "atlas skia: $(readlink -f "$ATLAS_DIR/subprojects/skia")"
+else
+	echo "note: no skia sources at $ATLAS_DIR/subprojects/skia; meson will download" \
+		"the wrap (~8 GB) unless ATLAS_SKIA_DIR=$ATLAS_SKIA_DIR is symlinked there"
+fi
 
 if [ -f "$ATLAS_BUILDDIR/build.ninja" ]; then
 	ok "atlas builddir: $ATLAS_BUILDDIR"

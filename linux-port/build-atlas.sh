@@ -230,8 +230,12 @@ grep -q "resources.arsc" <<<"$res_listing" || {
 [ -s "$ATLAS_OUT/system/etc/fonts.xml" ] || { echo "missing fonts.xml" >&2; exit 1; }
 
 # What this jar is for: the app's android.* superclasses, the one thing the
-# classpath check could not resolve. Needs build-classpath.sh to have run.
-if [ -d "$PORT_OUT/classpath" ]; then
+# classpath check could not resolve. Needs build-classpath.sh and build-shim.sh
+# to have run: the app's own classes name shim classes too (org.json), so
+# checking against half a class path only produces false hits. On a first build
+# the shim cannot exist yet — it compiles against this jar — so build-all.sh
+# comes back here once it does.
+if [ -d "$PORT_OUT/classpath" ] && [ -f "$PORT_OUT/shim.jar" ]; then
 	mkdir -p "$PORT_OUT/tools"
 	"$JAVA_HOME/bin/javac" -d "$PORT_OUT/tools" "$PORT_DIR/tools/PortClassCheck.java"
 	"$JAVA_HOME/bin/java" -cp "$PORT_OUT/tools:$ATLAS_OUT/api-impl.jar:$PORT_OUT/classpath/*" \
@@ -247,8 +251,9 @@ if [ -d "$PORT_OUT/classpath" ]; then
 	"$JAVA_HOME/bin/java" -cp "$PORT_OUT/tools:$ATLAS_OUT/api-impl.jar:$PORT_OUT/shim.jar:$PORT_OUT/classpath/*" \
 		ViewSignatureCheck "$PORT_OUT"/classpath/*.jar
 else
-	echo "note: out/classpath/ is missing, skipping the app class-resolution check" \
-		"(run build-classpath.sh)"
+	echo "note: out/classpath/ or out/shim.jar is missing, skipping the app" \
+		"class-resolution check (run build-classpath.sh and build-shim.sh," \
+		"or build-all.sh, which re-runs this script afterwards)"
 fi
 
 # --- provenance -------------------------------------------------------------
