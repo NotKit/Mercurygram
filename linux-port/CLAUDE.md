@@ -125,3 +125,19 @@
 - `ATL_NO_GPU=1` is on by default in `run.sh`: atlas's Ganesh path crashes in
   skia's `GrGLExtensions::init` on any GL driver here. Don't chase it from the
   Java side.
+- The UI can be driven: atlas feeds GLFW mouse and key events into
+  `ViewRootImpl`, so `xdotool mousemove/click/type` against the (Xvfb) display
+  works on the real app. `check-mtproto.sh` is the worked example — positions
+  are per-mille of the ATLWindow, and the log, not a screenshot, is what tells
+  the script whether a step took.
+- The port builds with `APP_ID=0` (dummy `./API_KEYS`), so Telegram answers
+  every request that opens a connection with `400 CONNECTION_API_ID_INVALID`.
+  That is enough to prove a round trip, never enough to log in — export
+  `APP_ID`/`APP_HASH` and re-run `build-classpath.sh` first.
+- Backgrounding a shell *function* that runs the launcher makes `$!` the
+  subshell's pid, and killing that orphans the launcher. `exec` the binary
+  inside the function (`run.sh`). The launcher also ignores SIGTERM, so a timed
+  run ends in SIGKILL and exit 137.
+- `pgrep -f android-translation-layer-hotspot` matches the shell you type it in
+  too. Anchor the pattern (`^/…/android-translation-layer-hotspot `) before
+  killing anything.

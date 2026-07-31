@@ -439,3 +439,41 @@ symptom → fix; atlas commits are on `mercurygram/openjdk-port`.
 - **Kill the launcher for real.** A timed run that only sends SIGTERM can leave
   the process alive, and the next `build-atlas.sh` then fails with "Text file
   busy" when it installs the launcher binary. `run.sh` follows up with SIGKILL.
+
+## MTProto connectivity
+
+- **MTProto needed no fixes.** tgnet's glibc build talks to Telegram exactly as
+  the Android one does: `ConnectionsManager` starts its native network thread
+  from `ApplicationLoader.onCreate`, the dc2 handshake completes ~6s after the
+  login screen, `help.getConfig` comes back with the DC list, and the
+  connections then sit on `ping_delay_disconnect`/`pong`. BoringSSL, epoll and
+  the JNI callbacks all work as built by the BoringSSL and libtmessages builds.
+- **`APP_ID=0` is the real limit, not the port.** The port builds with the dummy
+  `./API_KEYS`, so every request carrying `initConnection` comes back
+  `400 CONNECTION_API_ID_INVALID` — `help.getNearestDc`, `help.getCountriesList`
+  and `auth.sendCode` alike. That is a full round trip (request serialised,
+  encrypted, sent, error decoded and delivered to the Java callback in 40ms),
+  which is what the MTProto check accepts, but no login is possible until real
+  `APP_ID`/`APP_HASH` are exported and `build-classpath.sh` re-run. **The chat-list check
+  cannot work without them**: a transplanted session would still fail on every
+  request.
+- **UI driving works with plain `xdotool`.** atlas maps GLFW mouse and key
+  callbacks onto `ViewRootImpl.dispatchTouchEvent`/`dispatchKeyEvent`, so
+  `xdotool mousemove/click/type` against the Xvfb display reaches the app.
+  Typing `15551234567` into the phone screen filled the country code, picked
+  "United States" from it and typed the rest into the number field, and the
+  whole intro → phone → confirm dialog → sendCode path ran with zero uncaught
+  exceptions. `check-mtproto.sh` is that sequence.
+- **`run.sh` was orphaning a launcher on every timed run.** `run_launcher >log &`
+  backgrounds a *subshell*, so `$!` was the subshell's pid: the SIGTERM and the
+  SIGKILL after it both hit the wrapper while the launcher kept running, kept
+  its X connection, and only died when something else killed the Xvfb — which is
+  where the `X connection to :90 broken` and `double free or corruption` lines at
+  the end of old logs came from. Fixed by `exec`ing the launcher in the
+  function; a timed run now leaves nothing behind and the log ends clean.
+- **The launcher does not stop on SIGTERM** (unresolved, and now visible because
+  the signal reaches it). It survives ≥10s, so `run.sh` falls back to SIGKILL
+  and accepts exit 137. `jstack` cannot attach to it (the JVM is created through
+  the invocation API), so the hung shutdown path was not identified. Worth an
+  atlas fix before the chat-list check, where a SIGKILL means the SQLite cache is never
+  closed cleanly.

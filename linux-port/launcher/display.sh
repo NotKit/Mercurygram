@@ -7,7 +7,8 @@
 #   port_screenshot FILE   # best effort, never fails the caller
 
 # Starts an Xvfb when the session has neither Wayland nor X, and kills it again
-# on exit. Sets a trap on EXIT, so call it before the caller sets its own.
+# on exit. Sets a trap on EXIT, so call it before the caller sets its own; a
+# caller that needs its own trap must kill $PORT_XVFB_PID from there instead.
 port_start_display() {
 	if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then
 		return 0
@@ -28,6 +29,7 @@ port_start_display() {
 	done
 	[ -n "$xvfb_pid" ] || { echo "could not start Xvfb" >&2; return 1; }
 
+	export PORT_XVFB_PID="$xvfb_pid"
 	trap 'kill '"$xvfb_pid"' 2>/dev/null || true' EXIT
 	echo "started Xvfb on $DISPLAY"
 }

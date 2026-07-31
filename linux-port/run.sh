@@ -63,7 +63,10 @@ export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_
 port_start_display
 
 run_launcher() {
-	"$launcher" \
+	# exec, so that backgrounding this function gives $! the launcher's own pid
+	# and not that of the subshell wrapping it -- a kill aimed at the subshell
+	# leaves the launcher running until something else notices.
+	exec "$launcher" \
 		--api-impl-jar "$ATLAS_API_IMPL_JAR" \
 		--framework-res "$ATLAS_FRAMEWORK_RES" \
 		--natives-dir "$ATLAS_NATIVES_DIR" \
@@ -100,14 +103,17 @@ for _ in $(seq 20); do
 	sleep 0.5
 done
 kill -9 "$launcher_pid" 2>/dev/null || true
-wait "$launcher_pid" || status=$?
+# 2>/dev/null: bash announces the killed job here, which is not news
+wait "$launcher_pid" 2>/dev/null || status=$?
 
 # --- verification -----------------------------------------------------------
 
 log_text=$(cat "$log")
 
-# SIGTERM from the kill above is how a timed run ends; anything else is real.
-if [ "$status" != 0 ] && [ "$status" != 143 ]; then
+# The kill above is how a timed run ends: 143 if SIGTERM took, 137 when it did
+# not and the SIGKILL had to (see BRINGUP_NOTES.md -- the launcher does not
+# currently stop on SIGTERM). Anything else is a real exit status.
+if [ "$status" != 0 ] && [ "$status" != 143 ] && [ "$status" != 137 ]; then
 	echo "the launcher exited $status:" >&2
 	tail -40 "$log" >&2
 	exit 1

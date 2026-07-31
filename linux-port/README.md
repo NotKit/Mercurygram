@@ -61,6 +61,7 @@ atlas android-translation-layer-hotspot
 | `launcher/` | why the HotSpot launcher lives in atlas, the smoke test that boots it, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
+| `check-mtproto.sh` | boots the app, drives the login screen with `xdotool` and checks the DC handshake and the `auth.sendCode` round trip in `out/run.log` |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -415,3 +416,36 @@ Two things to know about the run:
 - **`-Dtmessages.native.path`** points `NativeLoader` at
   `out/libtmessages.so`; without it the app would try to unpack an Android `.so`
   from the apk.
+
+A timed run ends by killing the launcher, which does not stop on `SIGTERM` yet,
+so `run.sh` follows up with `SIGKILL` and accepts exit 137 as a normal ending.
+
+### MTProto connectivity
+
+```sh
+linux-port/check-mtproto.sh                       # -> out/run.log, out/screenshots/mtproto-*.png
+linux-port/check-mtproto.sh --phone 15551234567   # number to type, country code first
+linux-port/check-mtproto.sh --seconds 120         # how long the app runs in total
+```
+
+The MTProto check. It boots the app with `run.sh`, then drives the real UI with
+`xdotool` (a prerequisite for this script only): **Start Messaging** → type the
+number → next → confirm the number, which is what makes the app send
+`auth.sendCode`. Afterwards it requires in `out/run.log`:
+
+- tgnet's native init — `network thread started` and the account config written;
+- a completed DC handshake within 30s of the login screen, and an answer to
+  `help.getConfig`;
+- no `UnsatisfiedLinkError`;
+- a server answer to `auth.sendCode`, plus `run.sh`'s own "no uncaught
+  exceptions" verdict for the whole run.
+
+Clicks are per-mille positions inside the ATLWindow, so they follow the window
+but not a layout change — if the login screen moves, the coordinates in the
+script are what to update.
+
+**API keys.** The port builds with the dummy `./API_KEYS` (`APP_ID=0`), so the
+server answers every request that opens a connection with
+`400 CONNECTION_API_ID_INVALID`. That is a complete round trip, all this check
+asks for, but it is not a login: export `APP_ID`/`APP_HASH` and re-run
+`build-classpath.sh` before transplanting a session.
