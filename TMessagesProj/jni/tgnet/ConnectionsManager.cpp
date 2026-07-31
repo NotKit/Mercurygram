@@ -2273,6 +2273,10 @@ void ConnectionsManager::failNotRunningRequest(int32_t token) {
         return;
     }
 
+    // MG: must be `return;`, not `return true;`. With a value the lambda's
+    // return type deduces to bool, and falling off the loop is then UB — GCC
+    // drops the iter != end() test and walks off the list. Clang/NDK happened
+    // to keep it, so this only bites the glibc port.
     scheduleTask([&, token] {
         for (auto iter = requestsQueue.begin(); iter != requestsQueue.end(); iter++) {
             Request *request = iter->get();
@@ -2287,7 +2291,7 @@ void ConnectionsManager::failNotRunningRequest(int32_t token) {
                 if (LOGS_ENABLED) DEBUG_D("cancelled queued rpc request %p - %s", request->rawRequest, typeid(*request->rawRequest).name());
                 requestsQueue.erase(iter);
                 removeRequestFromGuid(token);
-                return true;
+                return;
             }
         }
     });

@@ -874,3 +874,16 @@ cross build turned up, in the order it hit:
   android.view.View$AttachInfo` from `WindowInsetsCompat`, and
   `KeyGenParameterSpec cannot be cast to AlgorithmParameterSpec`) both appear in
   the x86_64 run log too: pre-existing framework gaps, not arm64 regressions.
+- **GCC acts on UB the NDK's clang let pass, and it killed the app five seconds
+  into every launch.** `ConnectionsManager::failNotRunningRequest`'s
+  `scheduleTask` lambda ended its match branch with `return true;`, so its return
+  type deduced to `bool` and falling off the loop became UB. GCC 13.3 concluded
+  the loop can only leave through the match, dropped the
+  `iter != requestsQueue.end()` test, and walked into the list sentinel —
+  `SIGSEGV` at `si_addr 0x16` in `checkPendingTasks`. `FileLoadOperation:818`
+  cancels tokens of *running* requests, which are never in `requestsQueue`, so
+  the first avatar load always hit it. Fixed as `return;` in
+  `TMessagesProj/jni/tgnet/ConnectionsManager.cpp` — an upstream bug, not a
+  compat gap, so it is the rare jni/ edit FR-7 does not cover; it belongs
+  upstream rather than in `port_compat.hpp`. Worth assuming there are more:
+  nothing in the port's flags warns about it, and only `-O2` GCC exposes it.
