@@ -625,8 +625,10 @@ messages, emoji panel. What is knowingly missing:
   because atlas's `ScrollView` extends `ViewGroup` where the SDK's extends
   `FrameLayout`. `build-atlas.sh` reports it without failing — it is off the
   parity path (see `BRINGUP_NOTES.md`).
-- Camera, hardware video decode, `SurfaceView`, notifications/UnifiedPush: atlas
-  gaps, out of scope here.
+- Hardware video decode, notifications/UnifiedPush: atlas gaps, out of scope
+  here. Camera1 exists in atlas now and the click enables it (see
+  `click/run.sh`), but only the device has a HAL — the desktop build would get
+  atlas's GStreamer `videotestsrc`.
 - **Never run the ART build and this port at the same time** — both would use
   the same auth key against Telegram.
 
@@ -661,7 +663,7 @@ Three things to know:
 ## The atlas commit this port needs
 
 atlas is built from `linux-port/atlas/`, branch **`mercurygram/openjdk-port`**,
-at commit **`8f8cb36e`** ("graphics: back ComposeShader with skia's blend shader").
+at commit **`5755b11f`** ("api-impl: draw each panel into its own layer").
 Every build records what it used in `out/atlas/ARTIFACTS.md` and
 `out/atlas/artifacts.env`.
 
@@ -688,7 +690,12 @@ a4e2a120 api-impl: draw drawables that have no intrinsic size
 aea000e9 api-impl: let setImageResource(0) clear the image
 45253f2b api-impl: stop TextView applying its gravity twice
 8f8cb36e graphics: back ComposeShader with skia's blend shader
+5755b11f api-impl: draw each panel into its own layer
 ```
+
+Between the last two the branch also merged atl-touch master, which is where
+the Camera1, EGL14 and audio-recording commits came from; they are not listed
+here one by one.
 
 They sit on top of atl-touch master; the commits below `087b14a5` (`fa0be5ad`
 and the desktop work before it) are the state this port started from.

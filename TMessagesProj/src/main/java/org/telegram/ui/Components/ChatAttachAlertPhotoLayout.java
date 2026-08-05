@@ -78,6 +78,7 @@ import org.telegram.messenger.AnimationNotificationsLocker;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.ChatObject;
+import org.telegram.messenger.ContentHub;
 import org.telegram.messenger.FileLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.ImageReceiver;
@@ -2562,6 +2563,76 @@ public class ChatAttachAlertPhotoLayout extends ChatAttachAlert.AttachAlertLayou
         }
     }
 
+    /**
+     * Take in media handed over by another app (content-hub on Ubuntu Touch) and
+     * show it selected. It is in no media store, so cameraPhotos — the list the
+     * grid keeps for photos the app itself produced — is where it belongs.
+     */
+    public void addImportedMedia(ArrayList<String> paths) {
+        boolean added = false;
+        for (int a = 0, size = paths.size(); a < size; a++) {
+            String path = paths.get(a);
+            File file = new File(path);
+            if (!file.exists() || file.length() == 0) {
+                continue;
+            }
+            MediaController.PhotoEntry entry;
+            if (ContentHub.isVideo(path)) {
+                entry = new MediaController.PhotoEntry(0, lastImageId--, 0, path, 0, true, 0, 0, file.length());
+                entry.duration = (int) videoDuration(path);
+            } else {
+                int width = 0, height = 0;
+                try {
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inJustDecodeBounds = true;
+                    BitmapFactory.decodeFile(path, options);
+                    width = options.outWidth;
+                    height = options.outHeight;
+                } catch (Exception ignore) {}
+                Pair<Integer, Integer> orientation = AndroidUtilities.getImageOrientation(path);
+                entry = new MediaController.PhotoEntry(0, lastImageId--, 0, path, orientation.first, false, width, height, file.length())
+                    .setOrientation(orientation);
+            }
+            // the broker's copy lives in our cache, so it goes once it is sent
+            entry.canDeleteAfter = true;
+            cameraPhotos.add(entry);
+            if (parentAlert.avatarPicker != 0) {
+                // one photo, and it goes straight to the cropper
+                adapter.notifyDataSetChanged();
+                cameraAttachAdapter.notifyDataSetChanged();
+                openPhotoViewer(entry, false, true);
+                return;
+            }
+            addToSelectedPhotos(entry, -1);
+            added = true;
+        }
+        if (added) {
+            adapter.notifyDataSetChanged();
+            cameraAttachAdapter.notifyDataSetChanged();
+        }
+    }
+
+    private static long videoDuration(String path) {
+        MediaMetadataRetriever retriever = null;
+        try {
+            retriever = new MediaMetadataRetriever();
+            retriever.setDataSource(path);
+            String duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            if (duration != null) {
+                return (long) Math.ceil(Long.parseLong(duration) / 1000.0f);
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        } finally {
+            try {
+                if (retriever != null) {
+                    retriever.release();
+                }
+            } catch (Exception ignore) {}
+        }
+        return 0;
+    }
+
     private boolean shouldLoadAllMedia() {
         return !parentAlert.isPhotoPicker && (parentAlert.baseFragment instanceof ChatActivity || parentAlert.storyMediaPicker || parentAlert.avatarPicker == 2);
     }
@@ -3814,7 +3885,11 @@ public class ChatAttachAlertPhotoLayout extends ChatAttachAlert.AttachAlertLayou
         }
         dropDownContainer.setVisibility(VISIBLE);
         if (!(previousLayout instanceof ChatAttachAlertPhotoLayoutPreview)) {
-            clearSelectedPhotos();
+            // the content-hub layout hands the media over before showing us, and
+            // clearing deletes the imported files
+            if (!(previousLayout instanceof ChatAttachAlertContentHubLayout)) {
+                clearSelectedPhotos();
+            }
             dropDown.setAlpha(1);
         } else {
             headerAnimator = dropDown.animate().alpha(1f).setDuration(150).setInterpolator(CubicBezierInterpolator.EASE_BOTH);

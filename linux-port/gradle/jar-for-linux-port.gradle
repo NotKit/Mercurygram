@@ -86,9 +86,12 @@ gradle.projectsEvaluated {
 
     // The R classes the app would dex. AGP writes them next to the
     // resource-linking task's output; there is no public artifact for it.
+    def processResources = app.tasks.named("process${variantCap}Resources")
     def copyRJar = app.tasks.register('copyLinuxPortRJar') {
         description = 'Copy the runtime R class jar for the desktop port.'
-        dependsOn app.tasks.named("process${variantCap}Resources")
+        // as an input, not just a dependency: without one Gradle calls this
+        // up-to-date forever and a new string never reaches the classpath
+        inputs.files processResources.map { it.outputs.files }
         outputs.file new File(classpathDir, 'mercurygram-res.jar')
         doLast {
             def root = app.layout.buildDirectory

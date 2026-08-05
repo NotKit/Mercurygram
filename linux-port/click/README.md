@@ -108,7 +108,16 @@ Beyond everything in `../README.md` under "Known limitations":
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
   same code crashes in skia and `run.sh` forces CPU raster.
   `MERCURYGRAM_NO_GPU=1` switches back if a device disagrees.
-- **No calls, no voice messages** — `jni/voip/` is not built (as on the desktop).
+- **No calls** — `jni/voip/` is not built (as on the desktop). Voice messages do
+  not need it: Telegram encodes those with its own opus code in
+  `libtmessages.so`, and the click enables the microphone gate for them.
+- **No round video messages.** `InstantCameraView` wants a MediaCodec *encoder*
+  (`createEncoderByType`, `COLOR_FormatSurface`); atlas can only decode.
+- **Camera1 is enabled but not device-verified.** `run.sh` sets
+  `ATL_UGLY_ENABLE_CAMERA=1` and pins `ATL_CAMERA_BACKEND=hybris`, so a device
+  without libhybris' `libcamera.so.1` fails loudly rather than serving
+  `videotestsrc`. Retest checklist: atlas `doc/CameraDevice.md`; camera2 stays a
+  zero-camera stub, so anything insisting on it still sees no camera.
 
 ## click-review
 

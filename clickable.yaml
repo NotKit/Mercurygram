@@ -61,6 +61,9 @@ dependencies_target:
   - wayland-protocols
   - libfontconfig-dev
   - libmaliit-glib-dev
+  # content-hub import: meson takes this as optional, so without it the
+  # ATLContentHub natives are dropped and the attach sheet falls back silently
+  - liblomiri-content-hub-glib-dev
   - libxkbcommon-dev
   - libgbm-dev
   - libicu-dev

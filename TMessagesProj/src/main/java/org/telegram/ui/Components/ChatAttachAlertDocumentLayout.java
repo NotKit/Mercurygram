@@ -143,6 +143,8 @@ public class ChatAttachAlertDocumentLayout extends ChatAttachAlert.AttachAlertLa
     private File currentDir;
     private boolean receiverRegistered = false;
     private DocumentSelectActivityDelegate delegate;
+    /** Non-null while the list shows files imported from another app. */
+    private ArrayList<String> importedFiles;
     private HashMap<String, ListItem> selectedFiles = new HashMap<>();
     public ArrayList<String> selectedFilesOrder = new ArrayList<>();
     private HashMap<FilteredSearchView.MessageHashId, MessageObject> selectedMessages = new HashMap<>();
@@ -1068,11 +1070,16 @@ public class ChatAttachAlertDocumentLayout extends ChatAttachAlert.AttachAlertLa
         searchAdapter.currentSearchFilters.clear();
         selectedFilesOrder.clear();
         listAdapter.history.clear();
-        listRoots();
+        if (importedFiles != null) {
+            listImportedFiles();
+        } else {
+            listRoots();
+        }
         updateSearchButton();
         updateEmptyView();
-        parentAlert.actionBar.setTitle(LocaleController.getString(R.string.SelectFile));
-        sortItem.setVisibility(VISIBLE);
+        parentAlert.actionBar.setTitle(LocaleController.getString(importedFiles != null
+            ? R.string.MercurygramContentHubImported : R.string.SelectFile));
+        sortItem.setVisibility(importedFiles != null ? GONE : VISIBLE);
         layoutManager.scrollToPositionWithOffset(0, 0);
     }
 
@@ -1080,6 +1087,50 @@ public class ChatAttachAlertDocumentLayout extends ChatAttachAlert.AttachAlertLa
     public void onHide() {
         sortItem.setVisibility(GONE);
         searchItem.setVisibility(GONE);
+        importedFiles = null;
+    }
+
+    /**
+     * Show files another app handed over (content-hub on Ubuntu Touch) instead of
+     * browsing the filesystem, which a confined app cannot read. Takes effect on
+     * the next {@link #onShow}.
+     */
+    public void setImportedFiles(ArrayList<String> paths) {
+        importedFiles = paths;
+    }
+
+    private void listImportedFiles() {
+        currentDir = null;
+        hasFiles = false;
+        listAdapter.items.clear();
+        for (int a = 0, size = importedFiles.size(); a < size; a++) {
+            String path = importedFiles.get(a);
+            File file = new File(path);
+            if (!file.isFile() || file.length() == 0) {
+                continue;
+            }
+            hasFiles = true;
+            ListItem item = new ListItem();
+            item.title = file.getName();
+            item.file = file;
+            String[] parts = file.getName().split("\\.");
+            item.ext = parts.length > 1 ? parts[parts.length - 1] : "?";
+            item.subtitle = AndroidUtilities.formatFileSize(file.length());
+            String name = file.getName().toLowerCase();
+            if (name.endsWith(".jpg") || name.endsWith(".png") || name.endsWith(".gif") || name.endsWith(".jpeg")) {
+                item.thumb = file.getAbsolutePath();
+            }
+            listAdapter.items.add(item);
+            // the user already picked these in the source app, so they start
+            // selected — except for a poll, where tapping one sends it
+            if (!parentAlert.isPollAttach && (maxSelectedFiles < 0 || selectedFiles.size() < maxSelectedFiles)) {
+                selectedFiles.put(item.file.getAbsolutePath(), item);
+                selectedFilesOrder.add(item.file.getAbsolutePath());
+            }
+        }
+        AndroidUtilities.clearDrawableAnimation(listView);
+        scrolling = true;
+        listAdapter.notifyDataSetChanged();
     }
 
     private void updateEmptyViewPosition() {
@@ -1111,7 +1162,8 @@ public class ChatAttachAlertDocumentLayout extends ChatAttachAlert.AttachAlertLa
             return;
         }
         if (!searchItem.isSearchFieldVisible()) {
-            searchItem.setVisibility(hasFiles || listAdapter.history.isEmpty() ? View.VISIBLE : View.GONE);
+            // nothing to search through when the list is a one-off import
+            searchItem.setVisibility(importedFiles == null && (hasFiles || listAdapter.history.isEmpty()) ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -1146,6 +1198,11 @@ public class ChatAttachAlertDocumentLayout extends ChatAttachAlert.AttachAlertLa
 
     @Override
     public boolean onBackPressed() {
+        // there is no directory above an import: back returns to the source apps
+        if (importedFiles != null) {
+            parentAlert.openContentHubLayout(ChatAttachAlertContentHubLayout.MODE_FILES, true);
+            return true;
+        }
         if (!canClosePicker()) {
             return true;
         }

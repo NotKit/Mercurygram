@@ -887,3 +887,85 @@ cross build turned up, in the order it hit:
   compat gap, so it is the rare jni/ edit FR-7 does not cover; it belongs
   upstream rather than in `port_compat.hpp`. Worth assuming there are more:
   nothing in the port's flags warns about it, and only `-O2` GCC exposes it.
+
+## Attaching files through content-hub
+
+A confined UT app cannot read `$HOME` and has no media store to enumerate, so
+Telegram's gallery grid and file browser are both empty on the device. The
+attach sheet now lists the apps content-hub says can supply the content and
+takes what they hand back, the way Lomiri's own picker does.
+
+- **The whole feature is behind `-Dtmessages.contenthub=1`**, set only by
+  `click/run.sh`. Without it `ContentHub.isEnabled()` is false, no reflection
+  happens, and the Android build takes its usual paths — the same escape-hatch
+  shape as `tmessages.native.path`.
+- **The app talks to `android.atl.ATLContentHub` by reflection.** It is a
+  framework class the Android SDK does not have, so naming it directly would not
+  compile; `org/telegram/messenger/ContentHub.java` resolves it once and caches
+  the three methods.
+- **The natives are device-only, and that is a runtime fact, not a build one.**
+  atlas compiles `android_atl_ATLContentHub.c` only where content-hub-glib
+  exists, so on the desktop the class loads but its methods do not bind. The
+  first `UnsatisfiedLinkError` turns `isEnabled()` off for good and the sheet
+  falls back to the photo and document layouts, which is what makes running the
+  desktop port with the property set harmless.
+- **Imported media joins `cameraPhotos`, not an album.** The files are in no
+  media store, and `cameraPhotos` is the list the photo grid already keeps for
+  photos the app itself produced — so selection, captions, quality and sending
+  all work unchanged. `clearSelectedPhotos()` deletes those files, so
+  `onShow` must skip it when the previous layout was the content-hub one.
+- **`MediaController.loadGalleryPhotosAlbums` returns early with the property
+  set.** Otherwise every attach-sheet open would query the media store, and
+  atlas's `ATLMediaContentProvider` answers such a query by popping its own
+  source picker — two pickers for one tap.
+- **`showLayout` no-ops on the layout that is already current.** One layout
+  serves both the Gallery and the File tab, so switching tabs has to reload it
+  and move the type-button highlight itself.
+- **The count button reads `currentAttachLayout`, which the animated switch only
+  assigns when the spring lands.** Handing over imported files therefore uses
+  the un-animated `showLayout`, or the send button stays at zero.
+- **`androidx.exifinterface` names `android.media.MediaDataSource`**, which
+  atlas did not have: `AndroidUtilities.getImageOrientation` died with
+  `NoClassDefFoundError` the first time an imported photo went through it. Fixed
+  as a declaration-only stub in atlas. A pre-existing gap — the external-camera
+  path would have hit it too, if the port could reach one.
+- **`copyLinuxPortRJar` declared no inputs**, so Gradle called it up-to-date
+  forever and a new string never reached `mercurygram-res.jar`: the app compiled
+  and then died with `NoSuchFieldError` on `R$string`. It now takes the
+  resource-processing output as an input.
+- **Voice recording needs the microphone gate, not just the camera one.** atlas
+  answers `checkPermission(RECORD_AUDIO)` with `DENIED` unless
+  `ATL_UGLY_ENABLE_MICROPHONE` is set, so the app asked for a permission that
+  nothing could grant. Both gates now live in `click/run.sh`.
+- **Two atlas gaps sat behind that prompt, and the first one froze the app.**
+  `MediaController.setBluetoothScoOn` called
+  `AudioManager.isBluetoothScoAvailableOffCall()`, which did not exist:
+  `NoSuchMethodError` → `FileLog.fatal` → `System.exit(2)`, i.e. the documented
+  "UI froze" (dead JVM, window still up). The next frame would have died the
+  same way on `AudioRecord.read(ByteBuffer, int)` — atlas had only the `short[]`
+  overload. Both added in atlas; `adjustStreamVolume` went in beside them,
+  because `getStreamVolume` always answers 0 and that is the branch
+  `checkVolumeBarUI` then takes, outside any `catch (Exception)`.
+- **Round video messages need a MediaCodec *encoder*, which atlas does not
+  have.** `InstantCameraView` calls `MediaCodec.createEncoderByType` and feeds
+  it `COLOR_FormatSurface`; atlas has `createByCodecName` and an ffmpeg
+  *decode* backend only. Voice messages avoid this entirely — Telegram encodes
+  those with its own opus code in `libtmessages.so`.
+- **Every bottom sheet blacked out the window behind it.** With the attach sheet
+  open the chat was not dimmed but gone: pure `(0,0,0)` everywhere outside the
+  sheet card (`out/screenshots/grid-sheet.png`), rather than the 20% shade
+  `dimBehindAlpha` asks for.
+- **A panel is not a window in atlas.** `ViewRootImpl.performDraw` drew panels
+  (Dialog, PopupWindow, `WindowManager.addView`) onto the same canvas as the
+  activity decor, so a non-SrcOver paint inside a panel reached the pixels
+  below. Telegram's `BottomSheet.SheetBackDrawable` is black in
+  `PorterDuff.Mode.SRC`, which is right on AOSP — the dialog has its own
+  transparent surface and the compositor blends it over the window — and wrote
+  premultiplied `(0,0,0,51)` straight over the chat here. The present path
+  blits without blending (`ATLCanvas.cpp` `kSrc`, `ATLWindow.c`'s textured
+  quad), so the alpha was dropped and RGB 0 reached the screen. Fixed in atlas
+  (`5755b11f`) with a `saveLayer` around each panel draw.
+- `BottomSheet.makeAttached` switches that paint to `SRC_OVER` because an
+  attached sheet draws inside the activity window. Under atlas *every* sheet is
+  in that situation, which is the shape of this class of bug: an app path that
+  is only correct because Android gave it a surface of its own.

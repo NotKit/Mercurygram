@@ -57,6 +57,21 @@ fi
 # if it dies in skia.
 [ -n "${MERCURYGRAM_NO_GPU:-}" ] && export ATL_NO_GPU=1
 
+# android.hardware.Camera is gated off in atlas; without this every app sees
+# zero cameras. Pin the hybris backend so a missing libcamera.so.1 fails loudly
+# instead of quietly serving videotestsrc (atlas doc/CameraClickPackaging.md).
+export ATL_UGLY_ENABLE_CAMERA=1
+export ATL_CAMERA_BACKEND="${ATL_CAMERA_BACKEND:-hybris}"
+
+# Round video messages and voice messages record audio, and atlas gates the
+# microphone the same way: without this checkPermission(RECORD_AUDIO) answers
+# DENIED, so the app keeps asking for a permission nothing can grant.
+export ATL_UGLY_ENABLE_MICROPHONE=1
+
+# -Dtmessages.contenthub: the attach sheet lists content-hub's source apps
+# instead of a gallery grid and a file browser, neither of which a confined app
+# can fill. Device only — content-hub is not reachable from the desktop build.
+
 exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --api-impl-jar "${PKG_ROOT}/atlas/api-impl.jar" \
     --framework-res "${PKG_ROOT}/atlas/framework-res.apk" \
@@ -65,5 +80,6 @@ exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --library-path "${PKG_ROOT}/lib" \
     --launch-activity org.telegram.ui.LaunchActivity \
     -X "-Dtmessages.native.path=${PKG_ROOT}/lib/libtmessages.so" \
+    -X "-Dtmessages.contenthub=1" \
     "$@" \
     "${PKG_ROOT}/app.apk"

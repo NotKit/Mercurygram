@@ -95,6 +95,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.AnimationNotificationsLocker;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.ChatObject;
+import org.telegram.messenger.ContentHub;
 import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.Emoji;
 import org.telegram.messenger.FileLog;
@@ -1006,7 +1007,8 @@ public class ChatAttachAlert extends BottomSheet implements NotificationCenter.N
     private ChatAttachAlertEmojiLayout emojiLayout;
     private ChatAttachAlertEmojiLayout stickersLayout;
     private ChatAttachAlertRichLayout richLayout;
-    private AttachAlertLayout[] layouts = new AttachAlertLayout[11];
+    private ChatAttachAlertContentHubLayout contentHubLayout;
+    private AttachAlertLayout[] layouts = new AttachAlertLayout[12];
     private LongSparseArray<ChatAttachAlertBotWebViewLayout> botAttachLayouts = new LongSparseArray<>();
     private AttachAlertLayout currentAttachLayout;
     private AttachAlertLayout nextAttachLayout;
@@ -2515,7 +2517,8 @@ public class ChatAttachAlert extends BottomSheet implements NotificationCenter.N
 
         headerView.addView(mediaPreviewView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.MATCH_PARENT));
 
-        layouts[0] = photoLayout = new ChatAttachAlertPhotoLayout(this, context, forceDarkTheme, needCamera, resourcesProvider);
+        // with content-hub the camera is one of the source apps, not a grid cell
+        layouts[0] = photoLayout = new ChatAttachAlertPhotoLayout(this, context, forceDarkTheme, needCamera && !ContentHub.isEnabled(), resourcesProvider);
         photoLayout.setTranslationX(0);
         currentAttachLayout = photoLayout;
         selectedId = 1;
@@ -2751,7 +2754,11 @@ public class ChatAttachAlert extends BottomSheet implements NotificationCenter.N
                     if (!photosEnabled && !videosEnabled) {
                         showLayout(restrictedLayout = new ChatAttachRestrictedLayout(1, this, getContext(), resourcesProvider));
                     }
-                    showLayout(photoLayout);
+                    if (ContentHub.isEnabled()) {
+                        openContentHubLayout(ChatAttachAlertContentHubLayout.MODE_MEDIA, true);
+                    } else {
+                        showLayout(photoLayout);
+                    }
                 } else if (num == 3) {
                     if (!musicEnabled && checkCanRemoveRestrictionsByBoosts()) {
                         return;
@@ -4965,8 +4972,85 @@ public class ChatAttachAlert extends BottomSheet implements NotificationCenter.N
         }
         documentLayout.isSoundPicker = isSoundPicker;
         if (show) {
-            showLayout(documentLayout);
+            if (ContentHub.isEnabled()) {
+                openContentHubLayout(ChatAttachAlertContentHubLayout.MODE_FILES, true);
+            } else {
+                showLayout(documentLayout);
+            }
         }
+    }
+
+    /**
+     * Ubuntu Touch: the gallery and the file browser are both replaced by the list
+     * of apps content-hub can import from. The layout the import feeds is still
+     * built here, because it is what shows the result.
+     */
+    void openContentHubLayout(int mode, boolean show) {
+        if (contentHubLayout == null) {
+            layouts[11] = contentHubLayout = new ChatAttachAlertContentHubLayout(this, getContext(), resourcesProvider);
+        }
+        if (mode == ChatAttachAlertContentHubLayout.MODE_FILES) {
+            openDocumentsLayout(false);
+        } else {
+            // starting a new pick: drop whatever a previous import left behind
+            photoLayout.clearSelectedPhotos();
+        }
+        long newId = mode == ChatAttachAlertContentHubLayout.MODE_FILES ? 4 : 1;
+        contentHubLayout.setMode(mode);
+        if (show) {
+            if (currentAttachLayout == contentHubLayout) {
+                // one layout serves both tabs, and showLayout no-ops on itself
+                selectAttachButton(newId);
+            } else {
+                showLayout(contentHubLayout, newId);
+            }
+        }
+    }
+
+    /** Move the highlight in the type-button row without a layout change. */
+    private void selectAttachButton(long newId) {
+        selectedId = newId;
+        for (int a = 0, count = buttonsRecyclerView.getChildCount(); a < count; a++) {
+            View child = buttonsRecyclerView.getChildAt(a);
+            if (child instanceof AttachButton) {
+                ((AttachButton) child).updateCheckedState(true);
+            }
+        }
+    }
+
+    /** No broker after all (the natives are device-only): back to the app's pickers. */
+    void onContentHubUnavailable(int mode) {
+        if (mode == ChatAttachAlertContentHubLayout.MODE_FILES) {
+            openDocumentsLayout(true);
+        } else {
+            showLayout(photoLayout, 1);
+        }
+    }
+
+    /** Files content-hub just imported, handed to the layout that can send them. */
+    void onContentHubImported(int mode, ArrayList<String> paths) {
+        boolean asDocuments = mode == ChatAttachAlertContentHubLayout.MODE_FILES;
+        if (!asDocuments) {
+            // a "pictures" source may still hand over something else
+            asDocuments = true;
+            for (int a = 0, size = paths.size(); a < size; a++) {
+                if (ContentHub.isMedia(paths.get(a))) {
+                    asDocuments = false;
+                    break;
+                }
+            }
+        }
+        // not animated: updateCountButton reads currentAttachLayout, and the
+        // animated switch only assigns it when the spring lands
+        if (asDocuments) {
+            openDocumentsLayout(false);
+            documentLayout.setImportedFiles(paths);
+            showLayout(documentLayout, 4, false);
+        } else {
+            photoLayout.addImportedMedia(paths);
+            showLayout(photoLayout, 1, false);
+        }
+        updateCountButton(0);
     }
 
     public boolean showSendButtonOnly(boolean show, boolean animated) {
@@ -6071,6 +6155,13 @@ public class ChatAttachAlert extends BottomSheet implements NotificationCenter.N
             layoutToSet = photoLayout;
             typeButtonsAvailable = avatarPicker == 0 && !storyMediaPicker;
             selectedId = 1;
+        }
+        // on Ubuntu Touch neither the gallery nor the file browser has anything to
+        // show; the sheet opens on the content-hub source list instead
+        if (ContentHub.isEnabled() && (layoutToSet == photoLayout || layoutToSet == documentLayout)) {
+            openContentHubLayout(layoutToSet == documentLayout
+                ? ChatAttachAlertContentHubLayout.MODE_FILES : ChatAttachAlertContentHubLayout.MODE_MEDIA, false);
+            layoutToSet = contentHubLayout;
         }
         buttonsRecyclerViewWrapper.setVisibility(typeButtonsAvailable ? View.VISIBLE : View.GONE);
         if (currentAttachLayout != layoutToSet) {

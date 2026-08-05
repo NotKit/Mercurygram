@@ -6110,6 +6110,10 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
     }
 
     public static void loadGalleryPhotosAlbums(final int guid) {
+        if (ContentHub.isEnabled()) {
+            // no media store to scan: media comes in through the content-hub broker
+            return;
+        }
         Thread thread = new Thread(() -> {
             final ArrayList<AlbumEntry> mediaAlbumsSorted = new ArrayList<>();
             final ArrayList<AlbumEntry> photoAlbumsSorted = new ArrayList<>();

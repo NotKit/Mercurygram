@@ -228,4 +228,9 @@
     <string name="MercurygramSendMediaPermissionGames">Games</string>
     <string name="MercurygramSendMediaPermissionInline">Inline Bots</string>
     <string name="MercurygramMapPreviewProviderOpenStreetMap">OpenStreetMap</string>
+    <string name="MercurygramContentHubMediaTitle">Send media from</string>
+    <string name="MercurygramContentHubFileTitle">Send file from</string>
+    <string name="MercurygramContentHubImported">Imported files</string>
+    <string name="MercurygramContentHubWaiting">Waiting for %1$s…</string>
+    <string name="MercurygramContentHubEmpty">No app can share this kind of content.</string>
 </resources>
