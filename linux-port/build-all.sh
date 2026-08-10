@@ -32,7 +32,7 @@ STEPS=(
 	"classpath|app jars and app.apk from Gradle"
 	"atlas|the atlas framework and the HotSpot launcher"
 	"shim|the libcore/dalvik compat shim"
-	"checks|atlas class checks with the shim, then NativeLoader"
+	"checks|atlas class checks with the shim, then NativeLoader and apk extraction"
 )
 
 clean=""
@@ -106,6 +106,10 @@ step_checks() {
 	# NativeLoader picks up the glibc libtmessages.so inside the real
 	# launcher. Exercises the whole stack short of the UI.
 	"$PORT_DIR/check-native-loader.sh"
+	# Apk content comes out of the apk, not the class path.
+	# Nothing in a boot reliably posts a notification, so this path needs its own
+	# check rather than a run.
+	"$PORT_DIR/check-extract-apk.sh"
 }
 
 # --- run them ---------------------------------------------------------------

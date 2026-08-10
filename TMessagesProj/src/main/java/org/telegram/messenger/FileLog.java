@@ -89,8 +89,21 @@ public class FileLog {
     private static ExclusionStrategy exclusionStrategy;
     private static HashSet<String> excludeRequests;
 
+    // The TL dumper below serializes every request and update with Gson, which
+    // reflects over the public fields of most of TLRPC. Unset on Android, so the
+    // app build keeps dumping; the desktop/Ubuntu Touch port sets
+    // -Dtmessages.tldump=0, where that reflection is the bulk of the metadata an
+    // ahead-of-time image has to declare.
+    private static final String TL_DUMP_PROPERTY = "tmessages.tldump";
+    private static final boolean tlDumpEnabled = tlDumpEnabled();
+
+    private static boolean tlDumpEnabled() {
+        String property = System.getProperty(TL_DUMP_PROPERTY);
+        return !("0".equals(property) || "false".equals(property));
+    }
+
     public static void dumpResponseAndRequest(int account, TLObject request, TLObject response, TLRPC.TL_error error, long requestMsgId, long startRequestTimeInMillis, int requestToken) {
-        if (!BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || request == null) {
+        if (!tlDumpEnabled || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || request == null) {
             return;
         }
         String requestSimpleName = request.getClass().getSimpleName();
@@ -141,7 +154,7 @@ public class FileLog {
     }
 
     public static void dumpUnparsedMessage(TLObject message, long messageId, int account) {
-        if (!BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || message == null) {
+        if (!tlDumpEnabled || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || message == null) {
             return;
         }
         try {

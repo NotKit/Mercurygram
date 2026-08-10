@@ -288,13 +288,11 @@ wait_for_log 'send message user_id = 0 chat_id = 0 channel_id = 0' 30 "$send_fro
 	tail -40 "$log" >&2
 	exit 1
 }
-wait_for_log '"TL_updateMessageID"' 60 "$send_from" || {
+# The ack. The port runs with the TL dumper off, so the response JSON
+# is gone and the app applying the update is what proves the round trip.
+wait_for_log 'process update TL_updateMessageID' 60 "$send_from" || {
 	echo "the server never acknowledged the message" >&2
 	tail -60 "$log" >&2
-	exit 1
-}
-wait_for_log 'process update TL_updateMessageID' 30 "$send_from" || {
-	echo "updateMessageID came back but the app did not process it" >&2
 	exit 1
 }
 sleep 4

@@ -6,7 +6,7 @@
 # -> Application.onCreate -> Activity.createMainActivity -> GLib main loop.
 #
 # Usage: linux-port/run.sh [--seconds N] [--stop-file PATH] [--data-dir DIR]
-#                          [--fresh] [--gpu] [-- ARGS...]
+#                          [--fresh] [--gpu] [--tl-dump] [-- ARGS...]
 #   --seconds N   quit after N seconds and check run.log (0 = run until closed)
 #   --stop-file   with --seconds, quit as soon as this file appears; the timeout
 #                 becomes the maximum. Lets a driving script end the run when it
@@ -15,7 +15,16 @@
 #   --fresh       wipe the data dir first (a first-launch run)
 #   --gpu         leave ATL_NO_GPU unset (see BRINGUP_NOTES.md: Ganesh crashes
 #                 in skia's GL interface assembly, so CPU raster is the default)
+#   --tl-dump     leave FileLog's TL dumper on (off by default here, see below).
+#                 Never pass it while tracing metadata.
 # Anything after -- is passed straight to the launcher.
+#
+# $PORT_EXTRA_JVM_ARGS is a whitespace-separated list of JVM options, each passed
+# on as one `-X OPTION` (the launcher's --extra-jvm-option, one option per flag).
+# It is how a driving script that does not forward `-- ARGS` -- check-*.sh -- gets
+# an option in, e.g. PORT_EXTRA_JVM_ARGS="-agentlib:native-image-agent=..." for
+# trace-metadata.sh. Unset means no extra options at all. An option containing a
+# space cannot be passed this way; use `-- -X "OPTION"`.
 #
 # Writes out/run.log and, with --seconds, out/screenshots/run.png.
 set -euo pipefail
@@ -28,6 +37,7 @@ stop_file=""
 data_dir="${ANDROID_APP_DATA_DIR:-$PORT_OUT/data}"
 fresh=0
 gpu=0
+tl_dump=0
 extra_args=()
 
 while [ $# -gt 0 ]; do
@@ -37,9 +47,18 @@ while [ $# -gt 0 ]; do
 	--data-dir) data_dir="$2"; shift 2 ;;
 	--fresh) fresh=1; shift ;;
 	--gpu) gpu=1; shift ;;
+	--tl-dump) tl_dump=1; shift ;;
 	--) shift; extra_args=("$@"); break ;;
 	*) echo "unknown option: $1" >&2; exit 1 ;;
 	esac
+done
+
+# Empty (not unset) expands to zero words under -u, so the -X pairs below are
+# simply absent when nothing asked for one.
+read -ra extra_jvm_args <<<"${PORT_EXTRA_JVM_ARGS:-}"
+extra_jvm_opts=()
+for opt in ${extra_jvm_args[@]+"${extra_jvm_args[@]}"}; do
+	extra_jvm_opts+=(-X "$opt")
 done
 
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
@@ -71,6 +90,13 @@ export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_
 # tgnet's native lines plus the app's separate files/logs/ files.
 export ANDROID_LOG_TAGS="${ANDROID_LOG_TAGS:-*:V}"
 
+# FileLog's TL dumper serializes every request and update with Gson, which is
+# most of run.log and most of the reflection an ahead-of-time image would have to
+# declare. Off here; --tl-dump brings the JSON back for MTProto
+# debugging, and must never be used while tracing metadata.
+tl_dump_opts=()
+[ "$tl_dump" = 1 ] || tl_dump_opts=(-X "-Dtmessages.tldump=0")
+
 port_start_display
 
 run_launcher() {
@@ -86,6 +112,8 @@ run_launcher() {
 		--launch-activity org.telegram.ui.LaunchActivity \
 		-X "-Dtmessages.native.path=$native_lib" \
 		-X "-XX:ErrorFile=$PORT_OUT/hs_err_pid%p.log" \
+		${tl_dump_opts[@]+"${tl_dump_opts[@]}"} \
+		${extra_jvm_opts[@]+"${extra_jvm_opts[@]}"} \
 		"${extra_args[@]}" \
 		"$PORT_OUT/app.apk"
 }

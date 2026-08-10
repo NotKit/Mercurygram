@@ -71,6 +71,10 @@ export ATL_UGLY_ENABLE_MICROPHONE=1
 # -Dtmessages.contenthub: the attach sheet lists content-hub's source apps
 # instead of a gallery grid and a file browser, neither of which a confined app
 # can fill. Device only — content-hub is not reachable from the desktop build.
+#
+# -Dtmessages.tldump=0: FileLog's TL debug dumper serializes every request and
+# update with Gson. It is most of what the app writes to the journal and it costs
+# real CPU on the device. Append -X "-Dtmessages.tldump=1" to bring it back.
 
 exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --api-impl-jar "${PKG_ROOT}/atlas/api-impl.jar" \
@@ -81,5 +85,6 @@ exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --launch-activity org.telegram.ui.LaunchActivity \
     -X "-Dtmessages.native.path=${PKG_ROOT}/lib/libtmessages.so" \
     -X "-Dtmessages.contenthub=1" \
+    -X "-Dtmessages.tldump=0" \
     "$@" \
     "${PKG_ROOT}/app.apk"

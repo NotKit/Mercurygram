@@ -185,10 +185,11 @@ if grep -q 'UnsatisfiedLinkError' <<<"$log_text"; then
 fi
 
 # The request going out is half of it; the server has to answer. A rejection
-# counts, a code being sent counts, silence does not.
+# counts, a code being sent counts, silence does not. The success side is tgnet's
+# own native line, not the TL dumper's JSON, which the port turns off.
 answer=$(grep -oE 'TL_auth_sendCode@[0-9a-f]+ got error [0-9]+ [A-Z_]+' <<<"$log_text" | head -1 || true)
 if [ -z "$answer" ]; then
-	grep -q 'TL_auth_sentCode' <<<"$log_text" || {
+	grep -qE 'got response for request .*TL_auth_sendCode' <<<"$log_text" || {
 		echo "auth.sendCode got no answer from the server" >&2
 		grep -A 6 'TL_auth_sendCode' <<<"$log_text" | head -30 >&2
 		exit 1; }

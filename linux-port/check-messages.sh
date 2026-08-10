@@ -206,14 +206,12 @@ wait_for_log 'send message user_id = 0 chat_id = 0 channel_id = 0' 30 "$send_fro
 	exit 1
 }
 # The server's answer: updateMessageID carries the id the local message takes
-# over, which is what turns the clock into a check mark.
-wait_for_log '"TL_updateMessageID"' 60 "$send_from" || {
+# over, which is what turns the clock into a check mark. The port runs with the
+# TL dumper off, so the JSON is gone and this line -- the app applying
+# the update -- is the ack.
+wait_for_log 'process update TL_updateMessageID' 60 "$send_from" || {
 	echo "the server never acknowledged the message" >&2
 	tail -60 "$log" >&2
-	exit 1
-}
-wait_for_log 'process update TL_updateMessageID' 30 "$send_from" || {
-	echo "updateMessageID came back but the app did not process it" >&2
 	exit 1
 }
 sleep 3
@@ -272,9 +270,11 @@ cmp -s "$shots/messages-chatlist.png" "$shots/messages-open.png" && {
 cmp -s "$shots/messages-typed.png" "$shots/messages-sent.png" && {
 	echo "the sent message never appeared in the list" >&2; exit 1; }
 
-sent_id=$(grep -oE '"TL_updateMessageID"[^}]*"id":[0-9]+' <<<"$log_text" | grep -oE '[0-9]+$' | head -1 || true)
-[ "${sent_id:-0}" -gt 0 ] || {
-	echo "the server's answer carried no message id" >&2; exit 1; }
+# The server-assigned id itself is only ever printed by the TL dumper, which the
+# port turns off; that the app processed an updateMessageID is the same proof
+# minus the number.
+grep -q 'process update TL_updateMessageID' <<<"$log_text" || {
+	echo "the server's answer carried no updateMessageID" >&2; exit 1; }
 
 [ "$incoming" = 1 ] || {
 	echo "no incoming message arrived within ${incoming_seconds}s" >&2
@@ -289,7 +289,7 @@ cmp -s "$shots/messages-before-incoming.png" "$shots/messages-after-incoming.png
 echo
 echo "message check passed:"
 echo "  Saved Messages opened with $loaded messages from the cache and drew"
-echo "  '$text' went out to inputPeerSelf and came back as message $sent_id"
+echo "  '$text' went out to inputPeerSelf and came back as an updateMessageID"
 echo "  an incoming message was processed and the dialog list redrew"
 echo "  screenshots in $shots/messages-*.png"
 exit 0

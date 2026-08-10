@@ -67,6 +67,7 @@ atlas android-translation-layer-hotspot
 | `check-mtproto.sh` | boots the app, drives the login screen with `xdotool` and checks the DC handshake and the `auth.sendCode` round trip in `out/run.log` |
 | `check-messages.sh` | opens Saved Messages, sends a text and checks the server ack and an incoming message in `out/run.log` |
 | `check-emoji.sh` | opens the emoji panel in Saved Messages, checks the glyphs it reads from `assets/emoji/`, taps one and sends it |
+| `trace-metadata.sh` | runs the four driving checks under GraalVM's tracing agent, merging one native-image config in `out/ni-config/` |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -431,6 +432,7 @@ linux-port/run.sh --seconds 60        # timed run: checks run.log, takes a scree
 linux-port/run.sh --seconds 600 --stop-file /tmp/done   # ... or until that file appears
 linux-port/run.sh --fresh             # start from an empty data dir
 linux-port/run.sh --gpu               # try Ganesh again (currently crashes, see below)
+linux-port/run.sh --tl-dump           # put the MTProto request/response JSON back
 linux-port/run.sh -- --window-width 1280   # anything after -- goes to the launcher
 ```
 
@@ -450,7 +452,7 @@ Messaging") and idles cleanly; with a transplanted session it reaches the chat l
 that file appears, so a driving script (`check-chatlist.sh`) can allow for a
 slow first sync without paying for it every time.
 
-Two things to know about the run:
+A few things to know about the run:
 
 - **CPU raster is the default.** atlas's Ganesh path segfaults inside skia's
   `GrGLExtensions::init` while assembling the GL interface — on llvmpipe and on
@@ -459,6 +461,11 @@ Two things to know about the run:
 - **`-Dtmessages.native.path`** points `NativeLoader` at
   `out/libtmessages.so`; without it the app would try to unpack an Android `.so`
   from the apk.
+- **`-Dtmessages.tldump=0`** switches off `FileLog`'s TL debug dumper, which
+  Gson-serializes every request and update. It was three quarters of
+  `out/run.log` (6.1 MB down to 1.5 MB over the same 90 s boot) and 310 of the
+  444 classes a native-image trace recorded. `--tl-dump` leaves it on
+  for MTProto debugging; never combine it with a metadata trace.
 - **`ANDROID_LOG_TAGS=*:V`** is exported, or liblog would drop everything below
   `INFO` and the app's own `FileLog.d` output would never reach `out/run.log`.
 
@@ -644,12 +651,22 @@ so the tracing agent attaches without any change to the port:
 
 ```sh
 linux-port/check-graalvm.sh                       # native-image + agent usable?
-JAVA_HOME=$GRAALVM_HOME linux-port/build-atlas.sh
+linux-port/trace-metadata.sh                      # the real profile -> out/ni-config/
+linux-port/trace-metadata.sh --only emoji         # re-trace one path on top of it
+
+# one run by hand, without the checks
 JAVA_HOME=$GRAALVM_HOME linux-port/run.sh --seconds 120 -- \
-    -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/native-image-config"
+    -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/ni-config-boot"
 ```
 
-Three things to know:
+`trace-metadata.sh` is the supported way: it runs `check-mtproto.sh`,
+`check-chatlist.sh`, `check-messages.sh` and `check-emoji.sh` in that order
+(mtproto boots `--fresh` and wipes the data dir; the rest transplant the session
+back), all with `config-merge-dir=out/ni-config`, and fails if any check does.
+The checks do not forward `-- ARGS`, so it passes the agent in through
+`$PORT_EXTRA_JVM_ARGS`, which `run.sh` splits into one `-X` per option.
+
+Things to know:
 
 - The agent ships with GraalVM, not with the OpenJDK the port pins, so
   `JAVA_HOME` has to point at a **GraalVM 21** build for a traced run. `env.sh`
@@ -657,14 +674,17 @@ Three things to know:
   overridable) and deliberately never assigns it into `JAVA_HOME` — the caller
   opts in, one command at a time, as above. `env.sh` keeps any
   `JAVA_HOME` that reports 21.x, and GraalVM CE 21.0.2 does.
-  `build-atlas.sh` stamps the builddir with the
-  JDK it used and reconfigures when that changes, which means a skia rebuild
-  (~2 min); switching back does the same.
+- **Run under GraalVM, never build under it.** Class files from the port's
+  OpenJDK 21.0.11 load fine on GraalVM CE 21.0.2, so nothing needs rebuilding;
+  `build-atlas.sh` stamps the builddir with the JDK it used and reconfigures when
+  that changes, which means a skia rebuild (~2 min) each way.
 - The agent records only what a run actually touches, and this stack is
   reflection-heavy in places a boot does not reach: atlas resolves every view's
   declared methods before drawing it, and the app looks up TL classes by name.
-  Drive the checks (`check-chatlist.sh`, `check-messages.sh`, `check-emoji.sh`)
-  under the agent and merge their configs rather than trusting one idle run.
+  Drive the checks under the agent and merge their configs rather than trusting
+  one idle run — which is what `trace-metadata.sh` does.
+- The agent writes its files when the VM shuts down, so a run that is killed
+  contributes nothing. Every check has to be allowed to finish.
 - `-X` is also how to pass anything else HotSpot-specific (`-Xmx`,
   `-XX:+UseSerialGC`); `JDWP_LISTEN=<port>` and `ATL_CHECK_JNI=1` are launcher
   environment variables for the debugger and for `-Xcheck:jni`.
