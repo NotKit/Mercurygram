@@ -5,7 +5,9 @@
 # (--run-class) against a fresh data dir, so the mtime guard cannot hide a copy
 # that never happened. The check asserts the three behaviours callers depend on:
 # real apk bytes for an entry that exists, a silent no-op for one that does not,
-# and a working directory branch.
+# and a working directory branch. It also holds the line the phase 1-2 review
+# drew: a miss (including an apk that cannot be opened at all) must neither throw
+# into the exception-blind native caller nor re-parse a central directory.
 #
 # Optional: -- <extra launcher args>, e.g. -X "-agentlib:native-image-agent=..."
 # to record what the extraction reaches for.
@@ -78,6 +80,8 @@ for expected in \
 	"missing entry: 'sound_in' threw nothing and created nothing" \
 	"directory: " \
 	"framework resource: res/drawable-mdpi-v4/stat_sys_upload_anim0.png extracted from framework-res.apk" \
+	"unreadable apk: '/nonexistent/no-such.apk' threw nothing and created nothing" \
+	"misses: " \
 	"extract-from-apk check: passed"
 do
 	grep -qF "$expected" <<<"$log_text" || {

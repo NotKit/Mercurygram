@@ -14,7 +14,19 @@ hint="set GRAALVM_HOME to a GraalVM CE 21 install (see linux-port/README.md)"
 [ -d "$GRAALVM_HOME" ] || fail "no GraalVM at \$GRAALVM_HOME ($GRAALVM_HOME); $hint"
 [ -x "$GRAALVM_HOME/bin/java" ] || fail "no java at $GRAALVM_HOME/bin/java; $hint"
 
-graal_version="$("$GRAALVM_HOME/bin/java" -version 2>&1 | head -1)"
+# Run first, inspect after: `cmd 2>&1 | head -1` in a command substitution swallows
+# the error text into the variable and, under pipefail, kills the script before the
+# variable is ever printed -- exactly the diagnostic this script exists to give.
+run_first_line() { # tool args... -> sets $out (all of it) and $first_line
+	local status=0
+	out="$("$@" 2>&1)" || status=$?
+	[ "$status" = 0 ] || fail "$* exited $status:
+$out"
+	first_line="$(head -1 <<<"$out")"
+}
+
+run_first_line "$GRAALVM_HOME/bin/java" -version
+graal_version="$first_line"
 case "$graal_version" in
 	*'version "21.'*) ok "GRAALVM_HOME: $GRAALVM_HOME" ;;
 	*) fail "need a JDK 21 at \$GRAALVM_HOME, got: $graal_version; $hint" ;;
@@ -28,8 +40,15 @@ ok "$graal_version"
 # --- native-image -----------------------------------------------------------
 ni="$GRAALVM_HOME/bin/native-image"
 [ -x "$ni" ] || fail "missing $ni; install the native-image component into $GRAALVM_HOME"
-ni_version="$("$ni" --version 2>&1 | head -1)"
-ok "native-image: $ni_version"
+run_first_line "$ni" --version
+ni_version="$first_line"
+# A native-image that prints an error and still exits 0 (a broken component
+# install does) would otherwise be reported as `ok: native-image: <error>`.
+case "$ni_version" in
+	*21.*) ok "native-image: $ni_version" ;;
+	*) fail "native-image did not report a 21.x version, got:
+$out" ;;
+esac
 ok "native-image path: $ni"
 
 # Merges and inspects the traced configs.

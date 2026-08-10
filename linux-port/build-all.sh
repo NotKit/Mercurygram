@@ -110,6 +110,13 @@ step_checks() {
 	# Nothing in a boot reliably posts a notification, so this path needs its own
 	# check rather than a run.
 	"$PORT_DIR/check-extract-apk.sh"
+	# FR-1a/FR-7: the framework answers Debug.dumpHprofData, so org/telegram/**
+	# needs no workaround for it. Fails if the reverted one comes back.
+	"$PORT_DIR/check-dump-hprof.sh"
+	# FR-4: every arm of TLClassStore instantiates. Traced by trace-metadata.sh,
+	# so the image gets metadata for all of them and not just the two a session
+	# happens to take.
+	"$PORT_DIR/check-tlstore.sh"
 }
 
 # --- run them ---------------------------------------------------------------

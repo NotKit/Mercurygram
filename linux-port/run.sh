@@ -23,8 +23,10 @@
 # on as one `-X OPTION` (the launcher's --extra-jvm-option, one option per flag).
 # It is how a driving script that does not forward `-- ARGS` -- check-*.sh -- gets
 # an option in, e.g. PORT_EXTRA_JVM_ARGS="-agentlib:native-image-agent=..." for
-# trace-metadata.sh. Unset means no extra options at all. An option containing a
-# space cannot be passed this way; use `-- -X "OPTION"`.
+# trace-metadata.sh. Unset means no extra options at all. Any whitespace
+# separates, newlines included. An option containing a space cannot be passed this
+# way -- a word that does not start with '-' is refused rather than mangled; use
+# `-- -X "OPTION"`. A timed run also fails if an option never reached the VM.
 #
 # Writes out/run.log and, with --seconds, out/screenshots/run.png.
 set -euo pipefail
@@ -54,12 +56,24 @@ while [ $# -gt 0 ]; do
 done
 
 # Empty (not unset) expands to zero words under -u, so the -X pairs below are
-# simply absent when nothing asked for one.
-read -ra extra_jvm_args <<<"${PORT_EXTRA_JVM_ARGS:-}"
+# simply absent when nothing asked for one. `-d ''` reads to NUL instead of to
+# the first newline: a plain `read -ra` stops at one, and a variable written over
+# two lines would lose everything after the first silently.
+read -ra extra_jvm_args -d '' <<<"${PORT_EXTRA_JVM_ARGS:-}" || true
 extra_jvm_opts=()
 for opt in ${extra_jvm_args[@]+"${extra_jvm_args[@]}"}; do
+	# Every JVM option starts with '-'. A word that does not is the visible half
+	# of an option that was split on its own space, which would otherwise reach
+	# the launcher as a broken option pair or be ignored.
+	case "$opt" in
+	-*) ;;
+	*) echo "PORT_EXTRA_JVM_ARGS: '$opt' is not a JVM option; options cannot" \
+		"contain spaces here, pass them as -- -X \"OPTION\"" >&2; exit 1 ;;
+	esac
 	extra_jvm_opts+=(-X "$opt")
 done
+[ "${#extra_jvm_opts[@]}" = 0 ] ||
+	echo "extra JVM options from \$PORT_EXTRA_JVM_ARGS: ${extra_jvm_args[*]}"
 
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
 native_lib="$PORT_OUT/libtmessages.so"
@@ -170,6 +184,18 @@ if [ "$status" != 0 ] && [ "$status" != 143 ] && [ "$status" != 137 ]; then
 	tail -40 "$log" >&2
 	exit 1
 fi
+
+# The launcher echoes every option it hands to JNI_CreateJavaVM. A requested
+# option that is not there was dropped somewhere between here and the VM (a
+# mis-split variable, an option the launcher rejected), and for the tracing agent
+# that means a run that traces nothing while still exiting 0.
+for opt in ${extra_jvm_args[@]+"${extra_jvm_args[@]}"}; do
+	grep -qF "jvm option: $opt" <<<"$log_text" || {
+		echo "the JVM never got '$opt' from \$PORT_EXTRA_JVM_ARGS" >&2
+		grep -F 'jvm option:' <<<"$log_text" | tail -20 >&2
+		exit 1
+	}
+done
 
 for expected in \
 	"JVM launched successfully" \

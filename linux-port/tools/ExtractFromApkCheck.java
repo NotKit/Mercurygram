@@ -25,6 +25,8 @@ public class ExtractFromApkCheck {
     private static final String ICON = "res/drawable-mdpi-v4/notification.webp";
     private static final String DIR = "res/drawable-mdpi-v4/";
     private static final String MISSING = "sound_in"; // what SoundPool passes
+    private static final int MISSES = 200;
+    private static final long MISS_BUDGET_MS = 50;
     // only in framework-res.apk: android.R.drawable.stat_sys_upload
     private static final String FRAMEWORK = "res/drawable-mdpi-v4/stat_sys_upload_anim0.png";
 
@@ -33,6 +35,7 @@ public class ExtractFromApkCheck {
         require(apk != null && !apk.isEmpty(), "-Dcheck.apk is not set");
         File dataDir = Environment.getExternalStorageDirectory();
         System.out.println("apk " + apk + ", data dir " + dataDir);
+
 
         // 1. single file: the bytes must be the apk's own, not some other jar's
         File icon = new File(dataDir, ICON);
@@ -78,6 +81,30 @@ public class ExtractFromApkCheck {
                 "extractFromAPK did not fall back to framework-res.apk for " + FRAMEWORK);
         System.out.println("framework resource: " + FRAMEWORK + " extracted from framework-res.apk, "
                 + frameworkFile.length() + " bytes");
+
+        // 5. an apk that cannot be opened is a miss, not an exception: the only
+        //    native caller (util.c extract_from_apk) cannot report one, and the
+        //    launcher does not check that --framework-res exists
+        File bogusTarget = new File(dataDir, "bogus_target");
+        AssetManager.extractFromAPK("/nonexistent/no-such.apk", MISSING, "bogus_target");
+        require(!bogusTarget.exists(), "extractFromAPK created " + bogusTarget);
+        System.out.println("unreadable apk: '/nonexistent/no-such.apk' threw nothing and created nothing");
+
+        // 6. a miss walks every apk, so it must not re-parse their central
+        //    directories: that is SoundPool's and MediaPlayer's normal path.
+        //    One cold JarFile open of this apk (64 MB, 9450 entries) measured
+        //    0.9 ms, and the old code paid one per apk on every miss.
+        //    No timing is taken here for the opens themselves: the JDK shares a
+        //    parsed ZipFile.Source between handles on the same file, and the
+        //    launcher's own boot extraction already holds this apk open.
+        long miss_start = System.nanoTime();
+        for (int i = 0; i < MISSES; i++)
+            AssetManager.extractFromAPK(apk, MISSING, MISSING);
+        long miss_ms = (System.nanoTime() - miss_start) / 1_000_000;
+        System.out.println("misses: " + MISSES + " lookups of '" + MISSING + "' in " + miss_ms
+                + " ms (budget " + MISS_BUDGET_MS + " ms; two apk opens each would be ~"
+                + (MISSES * 2 * 9 / 10) + " ms)");
+        require(miss_ms < MISS_BUDGET_MS, "a miss still costs an apk open: " + miss_ms + " ms");
 
         System.out.println("extract-from-apk check: passed");
         System.exit(0);

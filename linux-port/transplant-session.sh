@@ -51,22 +51,65 @@ if [ -f "$stamp" ] && [ "$force" = 0 ]; then
 	exit 0
 fi
 
-# An app still writing its WAL would be copied mid-transaction. Only two
-# processes can be: the port's own launcher, which owns $dst, and whatever atlas
-# run owns the source apk. A bare 'android-translation-layer' pattern also
-# matches every unrelated atlas app on the machine (another checkout's tests),
-# which blocks the transplant for no reason -- anchor it, as CLAUDE.md asks.
-src_apk="$(basename "$src")"
-src_apk="${src_apk%_}"
+# An app still writing its WAL would be copied mid-transaction, and rsync over a
+# live SQLite database is the corruption this guard exists to prevent. What
+# matters is a process *holding* one of the two session trees, never how its
+# command line was spelled: the same app is `$ATLAS_OUT/android-translation-layer-hotspot`,
+# `./android-translation-layer-hotspot` from out/atlas, a symlink to either, or
+# the click's `$PKG_ROOT/lib/...`, and only its open files are the same in all
+# four. Unrelated atlas apps (the long-running atlas-camera2 test that made
+# a later fix narrowed this) hold neither tree, so they still do not match.
+# -m, not -f: the destination does not exist yet on a first transplant (mkdir -p
+# is below), and -f prints nothing and exits 1 on a missing component, which
+# under `set -e` would abort here with no message at all.
+src_real="$(readlink -m "$src")"
+dst_real="$(readlink -m "$dst")"
+data_dir_real="$(readlink -m "$data_dir")"
+
 busy=""
-while read -r pid cmd; do
-	# /proc/pid/exe, because a shell whose command line merely names the launcher
-	# (this script's own, run with --from) matches the pattern just as well
-	exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+seen_pids=" "
+note_busy() { # pid why
+	case "$seen_pids" in *" $1 "*) return 0 ;; esac
+	seen_pids+="$1 "
+	local exe cmd
+	# A process that exited between the scan and here is reported all the same:
+	# an unreadable /proc entry is not a reason to drop a candidate silently.
+	exe="$(readlink "/proc/$1/exe" 2>/dev/null || true)"
+	cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null || true)"
+	busy+="  pid $1 (${2}): ${exe:-<exited>} ${cmd:-}"$'\n'
+}
+
+# One find over /proc, not a readlink per descriptor: there are thousands.
+# An open fd or a cwd inside either tree is the case that matters -- a live
+# SQLite connection always holds its database open.
+while read -r link target; do
+	pid="${link#/proc/}"; pid="${pid%%/*}"
+	[ "$pid" = "$$" ] && continue
+	note_busy "$pid" "holds $target"
+done < <(find /proc/[0-9]*/fd /proc/[0-9]*/cwd -maxdepth 1 \
+	\( -lname "$dst_real" -o -lname "$dst_real/*" \
+	   -o -lname "$src_real" -o -lname "$src_real/*" \) -printf '%p %l\n' 2>/dev/null || true)
+
+# ... and an app of ours that has the destination as its data dir but has not
+# opened anything in it yet. Restricted to the launcher by /proc/pid/exe: any
+# shell that exported the variable would match otherwise. The source side gets no
+# such check on purpose -- its data dir is the default one every atlas app shares.
+while read -r environ; do
+	pid="${environ#/proc/}"; pid="${pid%%/*}"
+	[ "$pid" = "$$" ] && continue
+	exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
 	case "${exe##*/}" in
-	android-translation-layer*) busy+="  $pid $cmd"$'\n' ;;
+	android-translation-layer*) ;;
+	*) continue ;;
 	esac
-done < <(pgrep -af "^$ATLAS_OUT/android-translation-layer-hotspot |android-translation-layer[^ ]* .*$src_apk" || true)
+	env_dir="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null |
+		sed -n 's/^ANDROID_APP_DATA_DIR=//p' || true)"
+	env_dir="${env_dir%%$'\n'*}"
+	[ -n "$env_dir" ] || continue
+	[ "$(readlink -f "$env_dir")" = "$data_dir_real" ] || continue
+	note_busy "$pid" "ANDROID_APP_DATA_DIR=$env_dir"
+done < <(grep -zlF "ANDROID_APP_DATA_DIR=" /proc/[0-9]*/environ 2>/dev/null || true)
+
 if [ -n "$busy" ]; then
 	echo "an app is using this session; stop it first:" >&2
 	printf '%s' "$busy" >&2

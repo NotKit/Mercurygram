@@ -139,13 +139,15 @@ port_screenshot "$shots/mtproto-phone.png"
 echo "submitting the number"
 click_at 949 502
 # The app asks "Is this the correct number?" before it sends anything; the log
-# is what tells us whether that dialog is up, so only click Yes if it is.
-if ! wait_for_log 'TL_auth_sendCode' 5; then
+# is what tells us whether that dialog is up, so only click Yes if it is. The
+# line is ConnectionsManager.sendRequestInternal's "send request <object> with
+# token = N", where <object> is TLObject's default toString.
+if ! wait_for_log 'send request .*TL_auth_sendCode' 5; then
 	port_screenshot "$shots/mtproto-confirm.png"
 	click_at 934 343
 fi
 
-wait_for_log 'TL_auth_sendCode' 30 || {
+wait_for_log 'send request .*TL_auth_sendCode' 30 || {
 	echo "auth.sendCode was never sent" >&2
 	tail -40 "$log" >&2
 	exit 1
@@ -185,11 +187,24 @@ if grep -q 'UnsatisfiedLinkError' <<<"$log_text"; then
 fi
 
 # The request going out is half of it; the server has to answer. A rejection
-# counts, a code being sent counts, silence does not. The success side is tgnet's
-# own native line, not the TL dumper's JSON, which the port turns off.
-answer=$(grep -oE 'TL_auth_sendCode@[0-9a-f]+ got error [0-9]+ [A-Z_]+' <<<"$log_text" | head -1 || true)
+# counts, a code being sent counts, silence does not. Both arms are the app's own
+# ConnectionsManager logging, not the TL dumper's JSON, which the port turns off
+# -- and deliberately not tgnet's native "got response for request %s"
+# line either: that %s is typeid(*request->rawRequest).name(), and
+# TgNetWrapper.cpp:111 wraps every request coming from Java in a TL_api_request,
+# so no Java request type can ever appear in it. (help.getConfig above is tgnet's
+# own C++ object, which is why the same shape works there.)
+answer=$(grep -oE 'TL_auth_sendCode@[0-9a-f]+ got error [0-9]+ [A-Z_0-9]+' <<<"$log_text" | head -1 || true)
 if [ -z "$answer" ]; then
-	grep -qE 'got response for request .*TL_auth_sendCode' <<<"$log_text" || {
+	# The success arm, untested here: with the dummy APP_ID the server always
+	# rejects, so only the error arm above ever runs in this environment.
+	# ConnectionsManager.java:445 logs "java received " + the deserialised
+	# response; auth.sendCode deserialises its own with
+	# TL_auth_sentCode.TLdeserialize (TLRPC.java:51020), whose three results are
+	# TL_auth_sentCode, TL_auth_sentCodeSuccess and TL_auth_sentCodePaymentRequired.
+	# Only auth.resendCode shares that response type, and this check never sends
+	# one -- that needs the code screen.
+	grep -qE 'java received .*TL_auth_sentCode' <<<"$log_text" || {
 		echo "auth.sendCode got no answer from the server" >&2
 		grep -A 6 'TL_auth_sendCode' <<<"$log_text" | head -30 >&2
 		exit 1; }

@@ -1624,3 +1624,596 @@ in the option list and 0 `/MTProto` lines; all four driving checks green twice
 over in the two traces above. Both repos clean apart from the notes and the
 `FileLog.java` `catch (Throwable)` hunk that has been in the tree since before
 the dumper work.
+
+## Phase 1-2 review: five script defects, fixed
+
+A code review after the apk change found nine defects the checks themselves could not
+see. These five are the `linux-port/` scripts; none changed a measured number, and
+`out/ni-config` is byte-identical before and after (`md5sum -c`, all six files
+OK).
+
+### `trace-metadata.sh` merged into a stale config (HIGH)
+
+The script did `mkdir -p "$config_dir"` and handed the agent `config-merge-dir`.
+The agent can only ever *add*, so re-running on a tree whose `out/ni-config` still
+held the pre-dumper trace merged today's 105 classes on top of yesterday's 613,
+printed `trace complete` and exited 0 — with the 304 `allPublicFields` entries
+the dumper removal took out still in it, each one an image root the image build
+would have to honour.
+The 105-class config only exists because a human `rm -rf`'d by hand; no script did.
+
+**It now wipes the config dir first**, and `--merge` is the opt-in. The reasoning
+for that default: the config is a build input, one command from a clean checkout
+has to reproduce it, and a merge cannot subtract. The wipe refuses to touch a
+directory holding anything but `*-config.json` /
+`agent-extracted-predefined-classes`, so an `rm -rf` never runs on a path the
+caller merely mistyped. `--only` is a partial profile, so it now needs `--merge`
+or its own `--config-dir` and reports `partial trace complete`, never
+`trace complete`.
+
+Measured on a stale directory seeded with 613 entries (`PORT_OUT` pointed at a
+scratch dir): "wiping …/ni-config", the four checks then ran, and the directory
+ended up empty because the launcher was missing — exit 1, `trace incomplete`.
+
+**`trace complete` is now impossible without a complete config.** The agent writes
+at VM shutdown; an option that never reached the VM leaves the directory as it was
+while every check still exits 0. The script therefore checks the six
+`*-config.json` files exist and are non-empty and that `reflect-config.json` parses
+to a non-empty list. With four stub checks that pass and write nothing: "the agent
+left … incomplete, missing: reflect-config.json …", exit 1. It also writes
+`<config-dir>.trace-stamp` (checks, date, JAVA_HOME, agent options, class count)
+so the image build can tell a full profile from a partial one.
+
+**The baseline is validated before anything runs.** `out/ni-config-baseline-boot`
+is a *kept* boot-only trace — it is the 2026-08-10, dumper-on, 444-class one, and
+no script produces it (nor could: with the dumper off, the same command now gives 93).
+`if [ -d ]` used to skip the comparison in silence. An explicit `--baseline` that
+does not exist is now an error before the first check; a missing default prints a
+note at the start *and* `=== no baseline comparison: … ===` where the diff would
+have been. README.md carries the one-run command that records one.
+
+**`$GRAALVM_HOME` is checked for 21.x there.** `env.sh` keeps an externally-set
+`JAVA_HOME` only while it reports 21.x and silently substitutes the port's OpenJDK
+otherwise — which has no agent. A JDK 17 in `GRAALVM_HOME` now fails with
+"$GRAALVM_HOME is not a JDK 21, so env.sh would drop it: openjdk version "17.0.9"".
+
+### `run.sh` truncated `$PORT_EXTRA_JVM_ARGS` at the first newline (MEDIUM)
+
+`read -ra arr <<<"$V"` reads one line, and the variable is documented as
+whitespace-separated. `W=$'-Done\n-Dtwo'; read -ra y <<<"$W"` → `${#y[@]}` is **1**.
+`trace-metadata.sh` survived only because its two options are joined by a
+backslash continuation inside one pair of quotes; had the `-agentlib` option been
+the dropped one, every trace would have traced nothing at exit 0 throughout.
+
+`read -ra … -d ''` reads to NUL instead, so all whitespace separates and nothing
+globs. Proven on a real run: `PORT_EXTRA_JVM_ARGS=$'-Dport.probe.one=1\n-Dport.probe.two=2'
+run.sh --seconds 45` → "run ok", and both `jvm option: -Dport.probe.*` lines in
+`out/run.log`.
+
+Two loud failures replace the silent drops: a word that does not start with `-`
+(the visible half of an option split on its own space) is refused before the
+launcher starts — `PORT_EXTRA_JVM_ARGS='-Dfoo=a b'` → "'b' is not a JVM option",
+exit 1 — and a timed run greps the launcher's own `jvm option:` echo for every
+requested option, failing if one never reached the VM. The agent path was
+re-verified through it end to end: `PORT_EXTRA_JVM_ARGS="-agentlib:native-image-agent=config-merge-dir=DIR
+-Dorg.graalvm.nativeimage.imagecode=runtime"` under `JAVA_HOME=$GRAALVM_HOME`,
+60 s → "run ok" and 93 reflect classes in `DIR`.
+
+### `check-graalvm.sh` hid the diagnostic it exists to print (LOW)
+
+`ni_version="$("$ni" --version 2>&1 | head -1)"` captures stderr into the variable,
+and under `pipefail` a non-zero exit kills the script before any `ok:` line — the
+error text dies unprinted. A `native-image` stub that prints "Error: image builder
+is broken" and exits 1 produced *no output at all* from the old code (exit 1). Both
+that and the `java -version` line now run the tool first and print everything it
+said on failure: "…/native-image --version exited 1: Error: image builder is
+broken". The converse case, a tool that prints an error and exits 0, used to be
+reported as `ok: native-image: <error text>`; the first line must now contain a
+21.x version, so it fails with "native-image did not report a 21.x version".
+
+### `transplant-session.sh`'s busy-app guard was too narrow (LOW)
+
+It matched `^$ATLAS_OUT/android-translation-layer-hotspot ` or a command line
+naming the source apk. `cd out/atlas && ./android-translation-layer-hotspot …`, a
+symlink, or the click's `$PKG_ROOT/lib/…` against the same `ANDROID_APP_DATA_DIR`
+matched neither, so it would rsync over a live SQLite WAL — the corruption the
+guard exists to prevent. A `readlink /proc/$pid/exe` that failed also dropped the
+candidate in silence.
+
+It now matches on **what holds the two session trees**, not on how the launch was
+spelled: one `find /proc/[0-9]*/fd /proc/[0-9]*/cwd -lname` pass (one process, not
+a `readlink` per descriptor — the whole scan is 0.27 s) plus, for a launcher that
+has not opened anything yet, `ANDROID_APP_DATA_DIR` out of `/proc/$pid/environ`
+restricted to an `android-translation-layer*` exe. A candidate whose `/proc` entry
+cannot be read is reported as `<exited>`, never dropped.
+
+Verified against a fake session: a `bash -c 'exec 3< …/cache4.db; sleep 60'` that
+names no launcher at all is caught ("pid … (holds …/cache4.db)"), so is a copy of
+the binary at an unrelated path with `ANDROID_APP_DATA_DIR` pointing at the
+destination, so is a process holding a file in the *source* tree. The narrowing
+the metadata trace asked for still holds: the six `atlas-camera2` `android-translation-layer`
+processes were running throughout, and a transplant with no real holder exits 0.
+
+The source side deliberately gets no environment check — its data dir is
+`~/.local/share/android_translation_layer`, which every atlas app on the machine
+shares, so matching it would block on the camera tests again.
+
+### README.md's hand-trace recipe could not work (LOW)
+
+`JAVA_HOME=$GRAALVM_HOME linux-port/run.sh …` — `GRAALVM_HOME` is exported by
+`env.sh`, which `run.sh` sources in its *own* shell, so in the reader's shell the
+prefix assigns an empty `JAVA_HOME` and `env.sh` substitutes the port's OpenJDK,
+where `-agentlib:native-image-agent` does not resolve. The recipe now sources
+`env.sh` first and passes `-Dorg.graalvm.nativeimage.imagecode=runtime` alongside
+the agent, without which a hand trace records the ~137 `View.overridesOnDraw`
+entries the registry work removed and contradicts `out/ni-config`. Run as written:
+"run ok", 93 reflect classes — the boot-only number, one apart from that stage's 94.
+
+## Phase 1-2 review: the three atlas-side defects, fixed
+
+The other half of the same review. All three are framework work, so all three are
+commits in `atlas/` (FR-1a) — `api-impl: add Debug.dumpHprofData` and
+`api-impl: keep an extractFromAPK miss cheap and quiet`. No measured number moved:
+`out/ni-config` is untouched, and `run.sh --seconds 90` still exits 0.
+
+### The app-source workaround was a missing framework method (FR-1a)
+
+The tree carried an uncommitted edit to `FileLog.dumpMemory()` widening
+`catch (Exception)` to `catch (Throwable)`, so that the `NoSuchMethodError` from
+`Debug.dumpHprofData` — a method atlas's `android/os/Debug.java` simply did not
+have — could not reach `FileLog.fatal()` and `System.exit(2)`. It was in every jar
+the branch's measurements were taken from, while a clean checkout did not have it:
+the verified artefact and the committed state differed.
+
+atlas now has the method. It writes no dump (there is no ART heap to walk, and
+nothing here reads hprof) and throws `IOException`, which is what AOSP declares and
+what the app's own `catch (Exception)` already handles. The app edit is reverted,
+so `org/telegram/**` is back to the two `-D`-guarded hooks — the dumper's
+`tmessages.tldump` and FR-7's `tmessages.native.path`.
+
+`check-dump-hprof.sh` + `tools/DumpHprofCheck.java` hold the line, and
+`build-all.sh` runs it. It checks both ends: `javap -c` on the built
+`TMessagesProj.jar` must show `dumpMemory` calling
+`android/os/Debug.dumpHprofData:(Ljava/lang/String;)V` inside a
+`Class java/lang/Exception` handler and **not** a `Throwable` one (the workaround
+coming back fails the check), and the framework half runs in the launcher via
+`--run-class`:
+
+```
+signature: public static void android.os.Debug.dumpHprofData(java.lang.String) throws java.io.IOException
+caught by catch (Exception): java.io.IOException: android.os.Debug.dumpHprofData is not implemented: /tmp/atl_check_heap.hprof
+dump-hprof check: passed
+```
+
+### A miss in `extractFromAPK` cost two central-directory parses (LOW)
+
+The fallback loop calls `extract(other, path, target)` for every other apk,
+and `extract(String, …)` opened `new JarFile(apk_path, false)` each time. That is
+the *normal* path for `SoundPool.load` and `MediaPlayer.create`, which pass bare
+resource entry names (`sound_in`) that are never apk entries — on the click, once
+per notification sound on device storage.
+
+Measured with the old jar, inside the launcher: **200 misses = 1134 ms**, ~5.7 ms
+each. A cold `JarFile` open of `out/app.apk` (64 MB, 9450 entries) is 0.9 ms, and a
+miss paid one per apk. The opened `JarFile`s are now kept in a static map for the
+life of the process; the same 200 misses are **0 ms** (`check-extract-apk.sh` step
+6, budget 50 ms).
+
+Note when measuring this: the JDK shares a parsed `ZipFile.Source` between open
+handles on the same file, so an `open+close` loop timed *while* something holds the
+apk open reads 35x too fast (2.9 ms vs 182 ms for 200 opens here). The check
+therefore asserts an absolute budget instead of comparing against a live baseline.
+
+A name with no `/` is *not* a safe short circuit for the same problem:
+`AndroidManifest.xml`, `classes.dex` and `resources.arsc` are top-level apk
+entries.
+
+### A `JarFile` exception could reach a native frame with no `ExceptionCheck` (LOW)
+
+`new JarFile()` throws on a missing or truncated apk, where its predecessor —
+`getSystemClassLoader().getResourceAsStream(path)` — returned null in silence. The
+only native caller, `util.c:extract_from_apk`, invokes this with
+`CallStaticVoidMethod` and no `ExceptionCheck`, so the pending exception would be
+delivered at some later, unrelated JNI transition. It is reachable: `click/run.sh`
+passes `--framework-res "${PKG_ROOT}/atlas/framework-res.apk"` and the launcher
+turns it into `-Datl.framework.res.path` without checking the file is there.
+
+Confirmed against the old jar — `check-extract-apk.sh` step 5 with
+`/nonexistent/no-such.apk` as the caller's apk:
+
+```
+Exception in thread "main" java.nio.file.NoSuchFileException: /nonexistent/no-such.apk
+	at android.content.res.AssetManager.extract(AssetManager.java:688)
+	at android.content.res.AssetManager.extractFromAPK(AssetManager.java:676)
+```
+
+An apk that cannot be opened is now a miss like any other (logged once, cached as
+"cannot be opened" so it is not retried), and only a failed *copy* still throws.
+`extract_from_apk` describes and clears a pending exception anyway, the same way
+`ATLWindow.c` does around its per-frame calls.
+
+The native half is verified by inspection, not end to end: on the port the only
+native caller left is `nativeShowNotification`, which needs a real delivered
+notification to reach (the boot extraction at `main.c:418` belongs to the dex
+launcher). What is verified is that the Java side no longer throws for either
+reason a native caller can hit.
+
+## Phase 1-2 review: the app-side and image-correctness defects, fixed
+
+The last three of the review's nine. Two of them decide what
+`build-image.sh` has to do, so they are fixed before anything tries to build an
+image.
+
+### `check-mtproto.sh`'s success arm could never match (MEDIUM)
+
+`grep -qE 'got response for request .*TL_auth_sendCode'` was unreachable, for the
+reason the review gave: that line is tgnet's own
+`ConnectionsManager.cpp:1312`, whose `%s` is `typeid(*request->rawRequest).name()`,
+and `TgNetWrapper.cpp:111` wraps **every** request coming from Java in a
+`TL_api_request`. Measured in a real run's `out/run.log`: the `got response`
+lines carry `14TL_api_request` for all nine Java requests, and a mangled C++ name
+only for tgnet's own objects (`17TL_help_getConfig`, `23TL_auth_bindTempAuthKey`)
+— which is why the same shape *does* work for `help.getConfig` two arms above.
+
+The review was wrong about the two `wait_for_log 'TL_auth_sendCode'` calls, and
+that is worth writing down: they match
+`ConnectionsManager.sendRequestInternal`'s own
+`FileLog.d("send request " + object + " with token = ")`
+(`ConnectionsManager.java:388`), where `object` is `TLObject`'s default
+`toString`. Exactly two lines in the whole log carry the literal:
+
+```
+3913:D/tmessages: send request org.telegram.tgnet.TLRPC$TL_auth_sendCode@283eac7f with token = 9
+4031:E/tmessages: org.telegram.tgnet.TLRPC$TL_auth_sendCode@283eac7f got error 420 FLOOD_WAIT_45810
+```
+
+Both waits are now spelled `send request .*TL_auth_sendCode`, so they say what
+they mean. The success arm is `java received .*TL_auth_sentCode`
+(`ConnectionsManager.java:445`): `auth.sendCode` deserialises its response with
+`TL_auth_sentCode.TLdeserialize` (`TLRPC.java:51020`), whose three results are
+`TL_auth_sentCode`, `TL_auth_sentCodeSuccess` and
+`TL_auth_sentCodePaymentRequired` — the prefix covers all three. Only
+`auth.resendCode` shares that response type and the check never sends one.
+
+**The success arm is correct by construction, not tested.** With the dummy
+`APP_ID=0` the server answers this number with `420 FLOOD_WAIT_*` every time, so
+only the error arm runs here; nothing in this environment can execute the other
+one. Whoever first runs the check with real `API_KEYS` should confirm it.
+
+The error arm's own pattern grew a digit class (`[A-Z_0-9]+`), so the summary now
+reads `got error 420 FLOOD_WAIT_45810` instead of stopping at `FLOOD_WAIT_`.
+
+### `FileLog`'s TL-dump flag would have baked into the image (MEDIUM)
+
+`private static final boolean tlDumpEnabled = tlDumpEnabled();` read the property
+in `<clinit>`. Nothing passes `-Dtmessages.tldump=0` to `native-image`, so a
+build-time-initialised `FileLog` would have frozen the flag at **true** and
+shipped an image with the dumper on — the exact Gson reflection over `TLRPC$*`
+that the dumper removal took out, back on the first MTProto response.
+
+Fixed in the app (still one `-D`-guarded escape hatch, FR-7): the value is read
+on first use and cached in a *mutable* `private static Boolean tlDump`. A
+build-time snapshot of that field is `null`, which is not an answer, so the first
+call at image runtime reads the real property. No `--initialize-at-run-time` and
+no build-time `-D` needed — **the image build has to remember nothing**, which is why this
+shape was chosen over the two the review offered.
+
+Verified in the built jar (`javap -p -c` on `out/classpath/TMessagesProj.jar`):
+
+```
+static {};
+   0: iconst_0   putstatic  databaseIsMalformed:Z
+   4: aconst_null putstatic Instance:Lorg/telegram/messenger/FileLog;
+```
+
+— no property read left in `<clinit>`, and `tlDump` is `private static
+java.lang.Boolean`. Both runtime arms still work on HotSpot: `run.sh --seconds 90`
+(property `0`) leaves **0** `req -> ` lines in `out/run.log` while 33 requests go
+out, and `run.sh --seconds 40 --tl-dump` (property unset, i.e. the Android
+default) dumps `req -> TL_langpack_getLanguages`.
+
+atlas's `View.IN_NATIVE_IMAGE` keeps the `static final` shape on purpose: its
+property is `org.graalvm.nativeimage.imagecode`, which `native-image` sets during
+the build, so folding it to "in an image" is the answer the image wants. Don't
+copy that pattern for a property only the *launcher* sets.
+
+### `TLClassStore` was registered for 2 arms of 19 (FR-4 gap)
+
+`TLClassStore.TLdeserialize` does `objClass.newInstance()` over a `SparseArray`
+the constructor fills with **20 entries covering 19 distinct classes** (the review
+said 20 distinct; `TL_decryptedMessage_layer17` maps to `TL_decryptedMessage`,
+which is already there). The four-check trace registered **two**: `TL_updates` and
+`TL_updateShort`, the arms the server happened to send. The other 17 would fail
+`newInstance()` in the image, be swallowed by that method's
+`catch (Throwable) -> FileLog.e` and return null — a dropped update, no crash.
+
+Fixed the way FR-4 asks: a check that exercises the arms, not a hand-edited
+config. `check-tlstore.sh` + `tools/TLClassStoreCheck.java`, in the port's
+two-ended style:
+
+- the jar half reads the class list out of the built
+  `TMessagesProj.jar`'s own bytecode. javac folds `TLRPC.TL_x.constructor` into an
+  `ldc <int>`, so the constructor is a run of `ldc int; ldc class; SparseArray.put`
+  and the class literals *are* the list. It asserts one literal per `put`, so an
+  arm added upstream is covered without editing the check;
+- the launcher half runs `Class.forName(name).newInstance()` on each inside
+  `--run-class`, which is what the agent needs to see. Deliberately not
+  `getDeclaredField("classStore")`: reading the private field would put
+  `TLClassStore.classStore` into `reflect-config.json` for the check's benefit
+  alone.
+
+`trace-metadata.sh` runs it first (seconds, no session, its own data dir) and
+`build-all.sh`'s `checks` step runs it too. Traced on its own into a scratch dir:
+**35 reflect classes, of which the 19 TL ones are all `<init>`, 17 of them not in
+`out/ni-config`** — every missing arm, and nothing else new (the other 16 entries
+are JDK security classes already in the config, and it adds no resource entry).
+
+One wrinkle worth knowing for any future `--run-class` check under the agent: the
+launcher reaches `main()` through `FindClass`, so the agent records the *harness*
+as a JNI root (`{"name": "TLClassStoreCheck", "methods": [{"name": "main", …}]}`).
+That class is not in the image and `native-image` warns about config it cannot
+resolve, so `trace-metadata.sh` drops that one entry by name after the run
+(`drop_harness`) — part of generating the config, not a hand edit of it.
+
+### Green after this stage
+
+`check-tlstore.sh` exit 0 ("all 19 classes in the store instantiate"),
+`check-mtproto.sh` exit 0 (`got error 420 FLOOD_WAIT_45810`, DC connected 6 s
+after the login screen), `run.sh --seconds 90` exit 0 "run ok",
+`trace-metadata.sh --only tlstore --config-dir <scratch>` exit 0. `out/ni-config`
+is untouched: still the phase-2 artefact, and now **two app-jar rebuilds old** —
+`FileLog`'s change is on no boot path, but stage 4's re-trace is what makes the
+config current. `check-mtproto.sh --fresh` wiped `out/data` again, as it always
+does; `transplant-session.sh` puts the session back.
+
+## Pre-phase-3 fixes: the whole review, verified independently
+
+The three sections above are what the fix stages reported. This one is the
+check on them, run on 2026-08-10 before phase 3 starts: every number here was
+produced by re-running the thing, not carried over from a stage report. It is
+also the section to read first when starting on the image launcher.
+
+### The HIGH finding is dead, with no flag to remember
+
+The test the fix needs to pass is not "the wipe works when you ask for it", it is
+"a session that knows nothing about the bug gets a correct config anyway". So
+`out/ni-config` was seeded with the real pre-dumper artefact
+(`cp -a out/ni-config-stale-us003 out/ni-config` — 613 classes, 62587 B, 366
+`allPublicFields`, 139 `onDraw`, `AndroidManifest.xml` and
+`res/drawable-mdpi-v4/notification.webp` in `resource-config.json`) and the trace
+was run the way the image build would run it:
+
+```
+$ linux-port/trace-metadata.sh          # no arguments at all
+wiping …/out/ni-config (--merge to keep what is in it)
+before: reflect 0 classes (0 B), jni 0 classes (0 B), resource 0 entries, …
+…
+trace complete: tlstore mtproto chatlist messages emoji all passed,
+122 reflect classes in …/out/ni-config          # exit 0
+```
+
+The result is **122 classes / 11094 B, not 613 + anything**: no
+`allPublicFields` entry, no `onDraw` entry, no `res/` entry, i.e. nothing the
+stale directory carried survived. The wipe is the default and needs no flag, so
+the fix does not depend on an operator remembering one.
+
+### The trace, end to end
+
+One run, five checks, all exit 0 (`out/trace-<name>.log` each):
+
+| check | exit | time | reflect after |
+|---|---|---|---|
+| tlstore | 0 | 8 s | 35 (3406 B) |
+| mtproto | 0 | 163 s | 100 (9121 B) |
+| chatlist | 0 | 42 s | 114 (10469 B) |
+| messages | 0 | 48 s | 121 (10965 B) |
+| emoji | 0 | 54 s | 122 (11094 B) |
+
+Whole run 18:48:50 → 18:54:16 (5 min 26 s), `TRACE_EXIT=0`, and
+`out/ni-config.trace-stamp` records the five checks, `merged onto an existing
+config: no`, the GraalVM path and the two agent options.
+
+### The numbers, phase 2 vs now
+
+| | phase 2 (`ni-config`, 105) | now (122) |
+|---|---|---|
+| `reflect-config.json` | 105 classes, 9098 B | **122 classes, 11094 B** |
+| — `org.telegram.*` (non-array) | 19 | 36 |
+| — `TLRPC$*` | 2 | 19 |
+| — `allPublicFields` | 0 | **0** |
+| — entries asking `onDraw` | 0 | **0** |
+| — `<init>`-only entries | 35 | 52 |
+| — name-only entries | 53 (36 of them arrays) | 53 (36 arrays) |
+| `resource-config.json` | 10 entries, 0 × `res/` | **10 entries, 0 × `res/`** (byte-identical) |
+| `jni-config.json` | 62 classes, 13465 B | 63 classes, 13498 B |
+| `proxy-config.json` | empty | empty (byte-identical) |
+| `serialization-config.json` | empty | empty (byte-identical) |
+| `predefined-classes-config.json` | empty `agent-extracted` | empty (byte-identical) |
+
+`resource-`, `proxy-`, `serialization-` and `predefined-classes-config.json` are
+byte-identical to the phase-2 artefact (`md5sum`), so the whole change is in
+`reflect-config.json` and one JNI entry.
+
+### The increase is exactly the TLClassStore gap being closed
+
+`reflect-config.json` is **+17, −0** against phase 2, and all 17 are
+`TLClassStore`'s missing arms, each `<init>`-only:
+
+`TL_error`, `TL_null`, `TL_updateShortMessage`, `TL_updateShortChatMessage`,
+`TL_updateShortSentMessage`, `TL_updatesCombined`, `TL_updatesTooLong`,
+`TL_messageEncryptedAction`, `TL_message_secret`, `TL_message_secret_layer72`,
+`TL_message_secret_old`, `TL_decryptedMessage`, `TL_decryptedMessageLayer`,
+`TL_decryptedMessage_layer8`, `TL_decryptedMessage_layer45`,
+`TL_decryptedMessageService`, `TL_decryptedMessageService_layer8`.
+
+That set was predicted from the source before the trace ran (the 20 `put` calls
+in `TLClassStore.java` minus `TL_decryptedMessage_layer17`'s duplicate, minus the
+two arms the old trace already had) and the trace produced it exactly — nothing
+else, and nothing dropped. All 19 TLRPC entries in the config are
+`{"name": …, "methods": [{"name": "<init>", …}]}`.
+
+`jni-config.json`'s one new entry is `java.lang.String`, name-only, from the
+`--run-class` harness path; the harness class itself is not there
+(`drop_harness` did its job).
+
+### Success Metric 4 still holds
+
+> `reflect-config.json` is under ~150 classes after the dumper and registry work, and every
+> entry traces to a call site someone can point at.
+
+**122 of ~150.** By origin, adding up to 122 exactly:
+
+- 36 array classes (`Spannable.getSpans`),
+- 36 `org.telegram.*`: 19 `TLRPC$*` (`TLClassStore.java:58` `newInstance()`),
+  12 `NotificationBadge$*Badger`, 4 manifest components, `NotificationsService`,
+- 21 `java.*`/`sun.*`/`jdk.*`/`javax.*` (security providers, XML),
+- 14 `android.*`, 8 `androidx.*` (`androidx.startup` initializers),
+- 7 others: `com.android.internal.R$styleable`,
+  `com.sun.xml.internal.stream.XMLInputFactoryImpl`, `com.whatsapp.util.Log`,
+  `kotlin.reflect.jvm.internal.ReflectionFactoryImpl`, `KXmlParser`,
+  `KXmlSerializer`, `ru.noties.jlatexmath.JLatexMathInitProvider`.
+
+Correction to the phase-2 breakdown above: the badgers are **12**, not 13
+(`NotificationBadge$…` counted in the config), which is why that list added up to
+20 for a 19-entry set.
+
+The caveat phase 2 recorded — "a traced call site is only registered for the arms
+the trace took" — is now closed for `TLClassStore` specifically, and stays true
+in general.
+
+### FR-2: the HotSpot path, all re-run today with no agent
+
+One serial suite, the port's own OpenJDK 21 (no `JAVA_HOME`, no
+`PORT_EXTRA_JVM_ARGS`), each check's log kept:
+
+| check | exit | time | said |
+|---|---|---|---|
+| `check-env.sh` | 0 | 0 s | environment OK |
+| `check-graalvm.sh` | 0 | 0 s | GraalVM OK |
+| `check-extract-apk.sh` | 0 | 7 s | apk content came from the apk, not the class path |
+| `check-dump-hprof.sh` | 0 | 8 s | the framework answers `Debug.dumpHprofData`, app-side `catch (Exception)` is enough |
+| `check-tlstore.sh` | 0 | 8 s | all 19 classes in the store instantiate |
+| `check-mtproto.sh` | 0 | 103 s | DC handshake + `help.getConfig`; `TL_auth_sendCode` → `420 FLOOD_WAIT_44271` |
+| `check-chatlist.sh` | 0 | 40 s | 129 dialogs from cache4.db, no SQLite errors, the list scrolled |
+| `check-messages.sh` | 0 | 51 s | send came back as `updateMessageID`, an incoming message redrew the list |
+| `check-emoji.sh` | 0 | 53 s | 108 glyphs drawn, a tapped emoji went out as `mg-us014-…😚` |
+| `run.sh --seconds 90` | 0 | 102 s | run ok: booted to the main activity, no uncaught exceptions in 90s |
+
+`check-dump-hprof.sh` and `check-tlstore.sh` are not FR-2 checks; they are here
+because they are the regression guards for two of the fixes.
+
+Two guards were exercised directly rather than inferred, both exiting before any
+app run: `--only emoji` without `--merge` → "would replace … with a partial
+config", exit 1; a config dir holding `notes.txt` → "refusing to wipe …: it holds
+files no trace wrote", exit 1, and the file was still there afterwards.
+
+### Both repos clean, and the jars match the committed source
+
+`git status --short` is empty in `mercurygram-src` (`ralph/graalvm-native-image`)
+and in `linux-port/atlas` (`mercurygram/openjdk-port` at `21ae0094`). The
+`FileLog.java` `catch (Throwable)` hunk that sat uncommitted across four stories
+is **gone, not committed**: `dumpMemory` reads `catch (Exception e2)` again, and
+the only `org/telegram/**` change in `FileLog.java` against `Mercurygram` is the
+`-Dtmessages.tldump` escape hatch. The framework answers the call now
+(atlas `82fe6c38`).
+
+`build-classpath.sh` re-run from the clean tree: "64 actionable tasks: 64
+up-to-date", 11/11 class checks ok, and the jar was not rewritten — the sha256
+over the 12764 `org/telegram/**` class files in
+`out/classpath/TMessagesProj.jar` is `c320ee9c…` before and after. So the
+classpath the trace and the checks used is the committed source.
+
+### Per-finding disposition, all nine
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `trace-metadata.sh` merged into a stale config (HIGH) | fixed; re-proved here from a seeded 613-class directory, no flag needed |
+| 2 | `run.sh` truncated `$PORT_EXTRA_JVM_ARGS` at the first newline | fixed (`read -ra -d ''` + an "option never reached the VM" check) |
+| 3 | `check-graalvm.sh` swallowed the tool's diagnostic | fixed; `check-graalvm.sh` → "GraalVM OK" today |
+| 4 | `transplant-session.sh`'s busy-app guard was too narrow | fixed; the three session checks transplanted cleanly in both suites today |
+| 5 | README's hand-trace recipe assigned an empty `JAVA_HOME` | fixed |
+| 6 | `FileLog`'s `catch (Throwable)` workaround (FR-1a/FR-7) | fixed in atlas (`Debug.dumpHprofData`, atlas 82fe6c38); the app hunk is gone from the tree |
+| 7 | `AssetManager.extract` let a `JarFile` exception reach a native frame | fixed in atlas 21ae0094 + `util.c` `ExceptionDescribe`/`Clear` |
+| 8 | an `extractFromAPK` miss re-parsed both central directories | fixed in atlas 21ae0094 (`openApk()` cache) |
+| 9 | `check-mtproto.sh`'s success grep could never match | fixed; and the second half of that finding (the `wait_for_log`) was **not a defect** |
+| + | `FileLog`'s TL-dump flag would have baked into the image | fixed (mutable `Boolean`, read on first use) |
+| + | `TLClassStore` registered for 2 arms of 19 | fixed by `check-tlstore.sh`, and the +17 above is the proof |
+
+### What is still open going into phase 3
+
+Not defects found here, but things a later session should know:
+
+- `out/ni-config-baseline-boot`, the default `--baseline`, is the 2026-08-10
+  TL-dumper-on, 444-class trace and cannot be regenerated. The diff it prints is
+  dominated by the dumper's removals. `out/ni-config-boot-us005` (94 classes) is the
+  honest boot baseline; pass `--baseline out/ni-config-boot-us005` when the
+  comparison matters.
+- `trace-metadata.sh:80` still kills leftovers with `pkill -9 -f "^$launcher "`,
+  one spelling of the path. Correct today because every check launches through
+  `run.sh` with that absolute path.
+- `run.sh --seconds 0` (interactive) runs none of the verification block, so the
+  "an option never reached the VM" check does not apply to a manual run.
+- `android_app_NotificationManager.c:127` NULL-derefs when a notification icon is
+  not an apk entry (`g_mapped_file_new` unchecked). Pre-existing, unrelated to
+  the image, and the reason the new `util.c` `ExceptionCheck` could not be
+  exercised end to end.
+- `check-mtproto.sh`'s success arm is still unexecuted: with `APP_ID=0` the
+  server always answers `420 FLOOD_WAIT_*`, so only the error arm runs.
+
+### A second review of the fixes themselves, and what it left open
+
+The adversarial pass ran after the verification above, so none of it is in the
+tables. It found one regression and eight live defects. Only the regression is
+fixed; the rest are recorded here because a later session will meet them.
+
+Fixed (commit `readlink -m`): `transplant-session.sh:62` canonicalised the
+destination with `readlink -f` *before* the `mkdir -p` below it. `-f` prints
+nothing and exits 1 on a missing component, so under `set -e` the script died
+silently on every first transplant -- the flow `build-all.sh` itself points at.
+Reproduced (`--data-dir` at a fresh path: exit 1, no output), fixed with
+`readlink -m`, re-verified both ways plus the busy-app guard still firing.
+
+Open, in the order they would bite:
+
+- `trace-metadata.sh` relates `--config-dir` to nothing. `--baseline
+  $PORT_OUT/ni-config` -- a natural way to ask what a trace adds to the config
+  you have -- passes the existence check, is then wiped as the default
+  `config_dir`, refilled, and diffed against itself: `+0, -0` and "trace
+  complete". The foreign-file guard cannot help; a baseline dir holds exactly
+  the `*-config.json` the wipe considers its own.
+- `--only X --config-dir <the default dir>` is what the `--only` error message
+  tells the user to type, and it replaces the full five-check config with a
+  one-check partial.
+- The tlstore arm passes the agent straight to the launcher (`-- -X ...`),
+  bypassing `run.sh` and therefore the "the JVM never got '$opt'" check that
+  same fix stage added for exactly this. If the agent ever fails to attach,
+  `check-tlstore.sh` still says all 19 classes instantiate and the 17 arms go
+  unregistered with everything green. The harness does use the app's own
+  `newInstance()` call, so the registrations it makes are the right ones -- what
+  is missing is any assertion that they landed.
+- `util.c` now `ExceptionClear`s what `extractFromAPK` throws, and the only
+  remaining thrower is a failed `Files.copy`, which leaves a partial file whose
+  mtime is *newer* than the apk. `AssetManager`'s mtime guard then never
+  re-extracts it. ENOSPC part-way through an extract corrupts that asset for the
+  life of the data dir, silently.
+- The transplant guard now blocks on any fd or cwd under either tree, with the
+  exe filter only on the environ arm: running it from inside `out/data/app.apk_`,
+  or with a `tail -f` on the app's logs (which CLAUDE.md recommends), is refused
+  as "an app is using this session". It also dropped the command-line signal that
+  caught the *source* app during its startup window, before SQLite opens
+  anything.
+- `FileLog`'s move off `static final` rests on a premise nobody established:
+  Native Image initialises application classes at run time by default, in which
+  case the old shape already read the property at image runtime and the change
+  was a no-op. Where the premise does hold, the old shape gave the analysis a
+  constant `false` that dead-code-eliminates the whole Gson body -- which the new
+  shape makes impossible in every configuration. Correctness now rests entirely
+  on `-Dtmessages.tldump=0` reaching the image process, so the image build must prove it
+  does.
+- `README.md`'s hand-trace recipe writes `out/ni-config-boot`, but the default
+  `--baseline` reads `out/ni-config-baseline-boot`. Following the "no baseline
+  (see README)" note produces a directory the default never looks at.
+- `AssetManager` caches a `null` for an apk that failed to open and never
+  retries, and holds every opened `JarFile` in a static field for the life of the
+  process. If `build-image.sh` ever puts it on `--initialize-at-build-time`, a
+  live `ZipFile` in the image heap fails the build.

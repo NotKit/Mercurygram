@@ -94,16 +94,26 @@ public class FileLog {
     // app build keeps dumping; the desktop/Ubuntu Touch port sets
     // -Dtmessages.tldump=0, where that reflection is the bulk of the metadata an
     // ahead-of-time image has to declare.
+    //
+    // Read on first use and cached in a mutable field, never in <clinit>: an
+    // ahead-of-time image that initialises this class at build time would bake in
+    // whatever the *build* JVM's property said (i.e. dumping on), and the flag has
+    // to answer for the process that is running.
     private static final String TL_DUMP_PROPERTY = "tmessages.tldump";
-    private static final boolean tlDumpEnabled = tlDumpEnabled();
+    private static Boolean tlDump;
 
     private static boolean tlDumpEnabled() {
-        String property = System.getProperty(TL_DUMP_PROPERTY);
-        return !("0".equals(property) || "false".equals(property));
+        Boolean enabled = tlDump;
+        if (enabled == null) {
+            String property = System.getProperty(TL_DUMP_PROPERTY);
+            enabled = !("0".equals(property) || "false".equals(property));
+            tlDump = enabled;
+        }
+        return enabled;
     }
 
     public static void dumpResponseAndRequest(int account, TLObject request, TLObject response, TLRPC.TL_error error, long requestMsgId, long startRequestTimeInMillis, int requestToken) {
-        if (!tlDumpEnabled || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || request == null) {
+        if (!tlDumpEnabled() || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || request == null) {
             return;
         }
         String requestSimpleName = request.getClass().getSimpleName();
@@ -154,7 +164,7 @@ public class FileLog {
     }
 
     public static void dumpUnparsedMessage(TLObject message, long messageId, int account) {
-        if (!tlDumpEnabled || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || message == null) {
+        if (!tlDumpEnabled() || !BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || message == null) {
             return;
         }
         try {

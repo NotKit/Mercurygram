@@ -64,10 +64,13 @@ atlas android-translation-layer-hotspot
 | `launcher/` | why the HotSpot launcher lives in atlas, the smoke test that boots it, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
+| `check-extract-apk.sh` | proves `AssetManager.extractFromAPK` reads the apk, not the class path, and that a miss is cheap and throws nothing |
+| `check-dump-hprof.sh` | proves the framework answers `Debug.dumpHprofData`, so `org/telegram/**` carries no workaround for it |
+| `check-tlstore.sh` | instantiates every class in `TLClassStore`, the arms a driving run never takes (FR-4) |
 | `check-mtproto.sh` | boots the app, drives the login screen with `xdotool` and checks the DC handshake and the `auth.sendCode` round trip in `out/run.log` |
 | `check-messages.sh` | opens Saved Messages, sends a text and checks the server ack and an incoming message in `out/run.log` |
 | `check-emoji.sh` | opens the emoji panel in Saved Messages, checks the glyphs it reads from `assets/emoji/`, taps one and sends it |
-| `trace-metadata.sh` | runs the four driving checks under GraalVM's tracing agent, merging one native-image config in `out/ni-config/` |
+| `trace-metadata.sh` | runs the four driving checks plus `check-tlstore.sh` under GraalVM's tracing agent, merging one native-image config in `out/ni-config/` |
 | `build-shim.sh` | builds the compat shim into `out/shim.jar` + `out/libportshim.so` |
 | `shim/` | sources of the libcore/dalvik classes HotSpot has no equivalent for, plus `audit-shim.sh` and the audit note in `shim/README.md` |
 | `out/` | all build products and run logs — gitignored, safe to delete |
@@ -652,19 +655,42 @@ so the tracing agent attaches without any change to the port:
 ```sh
 linux-port/check-graalvm.sh                       # native-image + agent usable?
 linux-port/trace-metadata.sh                      # the real profile -> out/ni-config/
-linux-port/trace-metadata.sh --only emoji         # re-trace one path on top of it
+linux-port/trace-metadata.sh --only emoji --merge  # re-trace one path on top of it
 
-# one run by hand, without the checks
-JAVA_HOME=$GRAALVM_HOME linux-port/run.sh --seconds 120 -- \
-    -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/ni-config-boot"
+# one boot by hand, without the checks. GRAALVM_HOME comes from env.sh, and
+# run.sh sources env.sh in its own shell -- so source it here too, or the prefix
+# assigns an empty JAVA_HOME and env.sh quietly hands the run the port's OpenJDK,
+# where -agentlib:native-image-agent does not resolve.
+source linux-port/env.sh
+JAVA_HOME="$GRAALVM_HOME" linux-port/run.sh --seconds 120 -- \
+    -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/ni-config-boot" \
+    -X "-Dorg.graalvm.nativeimage.imagecode=runtime"
 ```
 
-`trace-metadata.sh` is the supported way: it runs `check-mtproto.sh`,
-`check-chatlist.sh`, `check-messages.sh` and `check-emoji.sh` in that order
-(mtproto boots `--fresh` and wipes the data dir; the rest transplant the session
+The `imagecode` property is not optional in a hand trace either: atlas gates
+`View.overridesOnDraw`'s `getDeclaredMethod` on it (atlas `cfa73805`), so a trace
+without it records ~137 `onDraw` entries the image never asks for and disagrees
+with `out/ni-config`. Such a boot-only config is also what `--baseline` compares
+against; no script keeps one up to date, so record it by hand when you want one.
+
+`trace-metadata.sh` is the supported way: it runs `check-tlstore.sh`,
+`check-mtproto.sh`, `check-chatlist.sh`, `check-messages.sh` and
+`check-emoji.sh` in that order (tlstore needs no session and takes seconds;
+mtproto boots `--fresh` and wipes the data dir; the rest transplant the session
 back), all with `config-merge-dir=out/ni-config`, and fails if any check does.
-The checks do not forward `-- ARGS`, so it passes the agent in through
-`$PORT_EXTRA_JVM_ARGS`, which `run.sh` splits into one `-X` per option.
+The driving checks do not forward `-- ARGS`, so it passes the agent in through
+`$PORT_EXTRA_JVM_ARGS`, which `run.sh` splits into one `-X` per option;
+`check-tlstore.sh` is a `--run-class` check and takes the same two options as
+launcher arguments after `--`.
+
+It **wipes `out/ni-config` first** unless `--merge` is given. The agent can only
+add to a config dir, so merging a new trace into an old one keeps every entry
+the dumper and registry work removed — and every reflect entry is an image root. One command
+from a clean checkout has to produce the config the image is built from, so the
+wipe is the default and `--merge` is the opt-in; `--only` needs `--merge` (or its
+own `--config-dir`), because one check alone is not a usable profile. It says
+`partial trace complete` in that case, and checks the config dir is complete
+before it says anything is.
 
 Things to know:
 
