@@ -199,20 +199,58 @@ cp "$PORT_OUT/shim.jar" "$INSTALL_DIR/classpath/"
 cp "$HOST_OUT"/classpath/*.jar "$INSTALL_DIR/classpath/"
 cp "$HOST_OUT/app.apk" "$INSTALL_DIR/app.apk"
 
-# The JVM. jmods and src.zip are build-time only (~130 MB); everything else the
-# runtime may reach through reflection stays.
+# The JVM: a jlink image of the modules the app reaches, not a copy of the whole
+# JDK (207 MB -> 75 MB). jlink is arch-neutral, so the host one builds the arm64
+# image out of the arm64 jmods; nothing here has to run under qemu.
 #
-# --copy-unsafe-links is what makes the bundle self-contained: Debian's JDK is a
-# tree of symlinks into /etc/java-21-openjdk (conf/*.properties, conf/security/,
-# lib/jvm.cfg) plus /etc/ssl/certs for cacerts, and none of that exists on the
-# device. Without it the JVM starts and then dies in Security.initialize with
-# "Error loading java.security file" the first time anything touches a provider —
-# which java.util.jar's signature verifier does while atlas parses the apk.
-log "bundling the arm64 JVM"
-mkdir -p "$INSTALL_DIR/jvm"
-rsync -a --copy-unsafe-links \
-	--exclude jmods --exclude src.zip --exclude man --exclude demo --exclude docs \
-	"$PORT_TARGET_JAVA_HOME/" "$INSTALL_DIR/jvm/"
+# The module set is $PORT_JVM_MODULES below. jdeps over classpath/ + api-impl
+# finds java.{base,compiler,desktop,instrument,management,sql} and jdk.unsupported
+# (java.xml and java.datatransfer follow transitively); the rest is what static
+# analysis cannot see — locales, EC for TLS, the JDWP agent the launcher's
+# JDWP_LISTEN needs. Re-run this when a dependency is added:
+#
+#   jdeps --ignore-missing-deps --print-module-deps --multi-release 21 \
+#         -cp 'classpath/*:atlas/api-impl.jar' classpath/*.jar atlas/api-impl.jar
+#
+# A jlink image also fixes what --copy-unsafe-links used to paper over: Debian's
+# JDK is a tree of symlinks into /etc/java-21-openjdk and /etc/ssl/certs, none of
+# which exists on the device. jlink writes real files, including a populated
+# cacerts (109 CAs, upstream's set rather than the build host's).
+#
+# Java debug attributes are kept on purpose: --strip-java-debug-attributes saves
+# another 6 MB and costs line numbers in every JDK frame of every stack trace.
+PORT_JVM_MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging"
+PORT_JVM_MODULES="$PORT_JVM_MODULES,java.management,java.naming,java.sql"
+PORT_JVM_MODULES="$PORT_JVM_MODULES,jdk.charsets,jdk.crypto.ec,jdk.jdwp.agent"
+PORT_JVM_MODULES="$PORT_JVM_MODULES,jdk.localedata,jdk.unsupported,jdk.zipfs"
+
+[ -d "$PORT_TARGET_JAVA_HOME/jmods" ] || {
+	echo "no jmods at $PORT_TARGET_JAVA_HOME (openjdk-21-jdk-headless:arm64)" >&2
+	echo "jlink needs them; the jre package alone is not enough" >&2
+	exit 1
+}
+# jlink refuses jmods from another JDK build. Both packages come from the same
+# Debian release in the container, so this only fires if one was pinned.
+host_build=$(sed -n 's/^JAVA_VERSION="\(.*\)"/\1/p' "$JAVA_HOME/release")
+target_build=$(sed -n 's/^JAVA_VERSION="\(.*\)"/\1/p' "$PORT_TARGET_JAVA_HOME/release")
+[ "$host_build" = "$target_build" ] || {
+	echo "JDK mismatch: host jlink is $host_build, arm64 jmods are $target_build" >&2
+	exit 1
+}
+
+log "jlinking the arm64 JVM ($PORT_JVM_MODULES)"
+rm -rf "$INSTALL_DIR/jvm"
+"$JAVA_HOME/bin/jlink" \
+	--module-path "$PORT_TARGET_JAVA_HOME/jmods" \
+	--add-modules "$PORT_JVM_MODULES" \
+	--no-header-files --no-man-pages --compress=zip-6 \
+	--output "$INSTALL_DIR/jvm"
+
+# libjvm.so is the launcher's DT_NEEDED and the JVM derives java.home from where
+# it was loaded from, so this one file decides whether the image is usable.
+[ -f "$INSTALL_DIR/jvm/lib/server/libjvm.so" ] ||
+	{ echo "jlink produced no lib/server/libjvm.so" >&2; exit 1; }
+log "  JVM image: $(du -sh "$INSTALL_DIR/jvm" | cut -f1)"
 
 install -m 0755 "$CLICK_DIR/run.sh" "$INSTALL_DIR/run.sh"
 cp "$CLICK_DIR/$HOOK.desktop" "$CLICK_DIR/$HOOK.apparmor" "$CLICK_DIR/$HOOK.svg" "$INSTALL_DIR/"
@@ -274,7 +312,7 @@ while read -r f; do
 	*"ARM aarch64"*) ;;
 	*) echo "  NOT aarch64: $f  ($(file -b "$f" | cut -c1-60))" >&2; bad=1 ;;
 	esac
-done < <(find "$INSTALL_DIR/lib" "$INSTALL_DIR/jvm/lib" -type f \
+done < <(find "$INSTALL_DIR/lib" "$INSTALL_DIR/jvm/lib" "$INSTALL_DIR/jvm/bin" -type f \
 	\( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null | grep -v '\.jar$')
 [ "$bad" = 0 ] || { echo "the click holds objects for the wrong architecture" >&2; exit 1; }
 

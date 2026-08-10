@@ -72,7 +72,7 @@ package avoids repeating.
                 $ORIGIN/ RUNPATH resolves all of it on the device.
     atlas/      api-impl.jar, framework-res.apk, system/etc/fonts.xml
     classpath/  shim.jar and the app jars
-    jvm/        the arm64 OpenJDK 21 runtime (minus jmods and src.zip)
+    jvm/        a jlink image of the arm64 OpenJDK 21, not a copy of the JDK
     app.apk     resources, assets and the manifest
     run.sh      the device launcher, mirroring linux-port/run.sh
 
@@ -80,6 +80,26 @@ package avoids repeating.
 `DT_NEEDED` that is not in it, transitively, and fails the build if something is
 neither on the device nor in the container — that is what stops "it linked on
 the host" from turning into a silent load failure on the phone.
+
+## The bundled JVM
+
+`build.sh` jlinks `jvm/` from the arm64 `jmods` instead of copying the JDK:
+**207 MB to 75 MB**. jlink is architecture-neutral, so the host's jlink builds
+the arm64 image — the cross build stays a cross build. This needs
+`openjdk-21-jdk-headless:arm64` in the container; the jre package has no `jmods`
+and the build stops with that message.
+
+The module set is `PORT_JVM_MODULES` in `build.sh`. `jdeps` finds most of it, and
+the comment there has the command to re-derive it when a dependency is added; the
+rest (locales, charsets, EC for TLS, the JDWP agent) is what static analysis
+cannot see. A missing module is not a build error — it is a `NoClassDefFoundError`
+on whatever path first needs it, so keep the set generous.
+
+Dropped along the way, none of it reachable at runtime: 30 MB of CDS archives
+(`classes*.jsa`, rebuilt per-JDK anyway), 11 MB of `ct.sym` (javac's historical
+API data), and `include/`. jlink also writes a real `cacerts` (109 upstream CAs)
+rather than Debian's symlink into `/etc/ssl/certs`, which is what
+`--copy-unsafe-links` used to work around.
 
 ## Status
 
@@ -101,9 +121,11 @@ Beyond everything in `../README.md` under "Known limitations":
   own gn args.
 - **Unconfined AppArmor**, like the ART packaging: a JVM needs far more than the
   click templates allow.
-- **436 MB installed (a 186 MB click)**, most of it the bundled JDK. `jlink`
-  against the arm64 `jmods` would cut it by more than half once the module set is
-  known.
+- **310 MB installed (a 175 MB click)**, now mostly the app: `classpath/` is
+  112 MB (81 MB of it `TMessagesProj.jar`) and `app.apk` another 62 MB. The
+  runtime is no longer the big half — see "The bundled JVM" below. Shrinking the
+  jars means R8, which the port cannot use: it needs `debug`'s unrenamed class
+  names.
 - **The GPU path is the default here** and it works on the device (`GPU rendering
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
   same code crashes in skia and `run.sh` forces CPU raster.
