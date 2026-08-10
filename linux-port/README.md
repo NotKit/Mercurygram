@@ -50,12 +50,13 @@ atlas android-translation-layer-hotspot
 
 | Path | Contents |
 | --- | --- |
-| `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `PORT_OUT`); source it, don't run it |
+| `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `GRAALVM_HOME`, `PORT_OUT`); source it, don't run it |
 | `build-all.sh` | every build step below, in dependency order — the one-command build |
 | `click/` | the arm64 Ubuntu Touch click: cross build and packaging, on top of everything below (`click/README.md`) |
 | `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on branch `mercurygram/openjdk-port`, gitignored here |
 | `build-atlas.sh` | builds atlas from `atlas/` into `out/atlas-build/`, installs `out/atlas/` |
 | `check-env.sh` | toolchain smoke test; exits 0 when the environment is usable |
+| `check-graalvm.sh` | the same for `$GRAALVM_HOME`: `native-image`, the tracing agent, and that it has not shadowed `JAVA_HOME` |
 | `native/` | glibc builds of the JNI deps (boringssl, ffmpeg, dav1d, libvpx) and of `libtmessages.so` |
 | `gradle/` | Gradle glue applied only under `-PlinuxPort` (the `jarForLinuxPort` task) |
 | `tools/` | small Java helpers used to verify the port's own artifacts |
@@ -88,6 +89,9 @@ atlas android-translation-layer-hotspot
   run scripts start an `Xvfb` themselves — that needs `Xvfb` and ImageMagick's
   `import` for the screenshots, and the driving checks need `xdotool`.
 - `check-env.sh` verifies all of the above except the run-time extras.
+- GraalVM CE 21 is needed only for the native image and its tracing agent, not
+  for the HotSpot port. `env.sh` points `GRAALVM_HOME` at
+  `/home/nekit/UT/graalvm-ce-21`; `check-graalvm.sh` verifies it.
 
 ## Usage
 
@@ -639,16 +643,21 @@ profile of a real run. The launcher forwards `-X "OPTION"` straight to the JVM,
 so the tracing agent attaches without any change to the port:
 
 ```sh
-JAVA_HOME=/path/to/graalvm-jdk-21 linux-port/build-atlas.sh
-JAVA_HOME=/path/to/graalvm-jdk-21 linux-port/run.sh --seconds 120 -- \
+linux-port/check-graalvm.sh                       # native-image + agent usable?
+JAVA_HOME=$GRAALVM_HOME linux-port/build-atlas.sh
+JAVA_HOME=$GRAALVM_HOME linux-port/run.sh --seconds 120 -- \
     -X "-agentlib:native-image-agent=config-output-dir=linux-port/out/native-image-config"
 ```
 
 Three things to know:
 
 - The agent ships with GraalVM, not with the OpenJDK the port pins, so
-  `JAVA_HOME` has to point at a **GraalVM 21** build — `env.sh` keeps any
-  `JAVA_HOME` that reports 21.x. `build-atlas.sh` stamps the builddir with the
+  `JAVA_HOME` has to point at a **GraalVM 21** build for a traced run. `env.sh`
+  pins the install as `GRAALVM_HOME` (default `/home/nekit/UT/graalvm-ce-21`,
+  overridable) and deliberately never assigns it into `JAVA_HOME` — the caller
+  opts in, one command at a time, as above. `env.sh` keeps any
+  `JAVA_HOME` that reports 21.x, and GraalVM CE 21.0.2 does.
+  `build-atlas.sh` stamps the builddir with the
   JDK it used and reconfigures when that changes, which means a skia rebuild
   (~2 min); switching back does the same.
 - The agent records only what a run actually touches, and this stack is

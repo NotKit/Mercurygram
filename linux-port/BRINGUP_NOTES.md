@@ -969,3 +969,49 @@ takes what they hand back, the way Lomiri's own picker does.
   attached sheet draws inside the activity window. Under atlas *every* sheet is
   in that situation, which is the shape of this class of bug: an app path that
   is only correct because Android gave it a surface of its own.
+
+## GraalVM native image
+
+- **`GRAALVM_HOME` is a second JDK, never the port's.** `env.sh` exports it
+  (default `/home/nekit/UT/graalvm-ce-21`, overridable) and never assigns it
+  into `JAVA_HOME`, nor puts its `bin/` on `PATH`: meson caches the java
+  compiler in coredata, so building atlas under GraalVM forces a
+  `--reconfigure` and a skia rebuild. A traced run opts in per command with
+  `JAVA_HOME=$GRAALVM_HOME`.
+- The existing `JAVA_HOME` block keeps any 21.x it is given, and GraalVM CE
+  21.0.2 reports `version "21.0.2"`, so that opt-in survives `env.sh`. Verified:
+  `JAVA_HOME=$GRAALVM_HOME` in, `openjdk version "21.0.2" … GraalVM CE 21.0.2`
+  out; with no `JAVA_HOME`, `env.sh` still picks the OpenJDK 21.0.11.
+- `check-graalvm.sh` is the GraalVM twin of `check-env.sh`. Beyond the criteria
+  it also checks `cc`/`ld`/`objcopy` and `zlib.h`, because `native-image` links
+  the image with the system toolchain and a missing zlib only surfaces at the
+  end of a long build.
+- **It is not in `build-all.sh`.** Every *build* script is a step there, but
+  GraalVM is not needed to build or run the HotSpot port, and a bare checkout
+  without it must still build. The image scripts call it themselves.
+- `native-image` and `native-image-configure` are in `$GRAALVM_HOME/bin`; the
+  tracing agent is `$GRAALVM_HOME/lib/libnative-image-agent.so`, resolved by
+  `-agentlib:native-image-agent` only when the running java *is* GraalVM's.
+
+## GLUtils.getEGLErrorString
+
+- **atlas's `GLUtils` had `texImage2D` and nothing else.** Every EGL error path
+  in the app formats its message with `GLUtils.getEGLErrorString(...)`, so the
+  *error handler* threw `NoSuchMethodError` — `FileLog.fatal` → `System.exit(2)`,
+  the documented "UI froze". Added in atlas (`0f27bebd`) with AOSP's strings for
+  the EGL10/EGL11 codes and AOSP's `"0x" + Integer.toHexString(error)` fallback.
+- The symptom only shows without a session: `IntroActivity$EGLThread.initGL`
+  runs on the intro screen, and `transplant-session.sh` had been hiding it
+  because a logged-in boot never draws that screen. Same call sits all over
+  `CameraView` and `InstantCameraView`.
+- **atlas's `eglGetDisplay` answers `EGL_NO_DISPLAY` and leaves the error at
+  `EGL_SUCCESS`**, so the intro now logs `eglGetDisplay failed EGL_SUCCESS` and
+  gives up on its GL animation. The screen itself is fine — `finish()` there is
+  `EGLThread`'s own teardown method, not `Activity.finish()` — so the intro
+  draws, minus the animated logo (`out/screenshots/run.png`).
+- Verified: `run.sh --fresh --seconds 120 --data-dir out/data-fresh` → "run ok",
+  0 `NoSuchMethodError` in `out/run.log`, intro screen with "Start Messaging" in
+  the screenshot; `check-mtproto.sh` → `TL_auth_sendCode` answered
+  (420 FLOOD_WAIT_, a real server reply).
+- Use a separate `--data-dir` for fresh runs. Plain `--fresh` wipes `out/data`,
+  which is where the transplanted session lives.

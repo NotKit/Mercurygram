@@ -51,9 +51,25 @@ if [ -f "$stamp" ] && [ "$force" = 0 ]; then
 	exit 0
 fi
 
-# An app still writing its WAL would be copied mid-transaction.
-if pgrep -f 'android-translation-layer' >/dev/null 2>&1; then
-	echo "an android-translation-layer process is running; stop it first" >&2
+# An app still writing its WAL would be copied mid-transaction. Only two
+# processes can be: the port's own launcher, which owns $dst, and whatever atlas
+# run owns the source apk. A bare 'android-translation-layer' pattern also
+# matches every unrelated atlas app on the machine (another checkout's tests),
+# which blocks the transplant for no reason -- anchor it, as CLAUDE.md asks.
+src_apk="$(basename "$src")"
+src_apk="${src_apk%_}"
+busy=""
+while read -r pid cmd; do
+	# /proc/pid/exe, because a shell whose command line merely names the launcher
+	# (this script's own, run with --from) matches the pattern just as well
+	exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+	case "${exe##*/}" in
+	android-translation-layer*) busy+="  $pid $cmd"$'\n' ;;
+	esac
+done < <(pgrep -af "^$ATLAS_OUT/android-translation-layer-hotspot |android-translation-layer[^ ]* .*$src_apk" || true)
+if [ -n "$busy" ]; then
+	echo "an app is using this session; stop it first:" >&2
+	printf '%s' "$busy" >&2
 	exit 1
 fi
 

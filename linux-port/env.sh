@@ -22,6 +22,12 @@ if [ -z "${JAVA_HOME:-}" ] || ! "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'v
 fi
 export PATH="$JAVA_HOME/bin:$PATH"
 
+# GraalVM CE 21 for native-image and its tracing agent (tasks/prd-mercurygram-
+# graalvm-native-image.md). It is a second JDK, never the port's: JAVA_HOME stays
+# the OpenJDK above, because meson caches the java compiler and swapping it forces
+# a skia rebuild. A tracing run opts in by exporting JAVA_HOME=$GRAALVM_HOME itself.
+export GRAALVM_HOME="${GRAALVM_HOME:-/home/nekit/UT/graalvm-ce-21}"
+
 # All build products land here; never committed.
 export PORT_OUT="${PORT_OUT:-$PORT_DIR/out}"
 export PORT_NATIVE_OUT="$PORT_OUT/native"
