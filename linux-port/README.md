@@ -27,6 +27,11 @@ than a program in this repo, because `libtranslation_layer_main.so` imports
 symbols from whatever executable loads it — see `launcher/README.md` for the
 decision and the full ART-vs-HotSpot difference table.
 
+The same sources also build `android-translation-layer-image`, which creates the
+VM from a GraalVM native-image shared library (`--vm-library`, `run.sh --image`)
+instead of `libjvm.so` and has no class path at all. `launcher/README.md` has
+the backend table.
+
 ```
 atlas android-translation-layer-hotspot
         |  JNI_CreateJavaVM
@@ -61,7 +66,8 @@ atlas android-translation-layer-hotspot
 | `gradle/` | Gradle glue applied only under `-PlinuxPort` (the `jarForLinuxPort` task) |
 | `tools/` | small Java helpers used to verify the port's own artifacts |
 | `build-classpath.sh` | builds the HotSpot classpath and the APK from the Android sources |
-| `launcher/` | why the HotSpot launcher lives in atlas, the smoke test that boots it, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
+| `launcher/` | why the launcher lives in atlas, the smoke tests that boot it on either VM backend, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
+| `build-image.sh` | no flag: the real native image over api-impl + shim + the classpath jars, ~4.5 min and ~9 GB (`out/image/build-stats.env`). `--stub`: the one-class image `launcher/image-smoke-test.sh` checks the image launcher against |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
 | `check-extract-apk.sh` | proves `AssetManager.extractFromAPK` reads the apk, not the class path, and that a miss is cheap and throws nothing |

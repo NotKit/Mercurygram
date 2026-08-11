@@ -75,12 +75,29 @@
 - Nothing can be shimmed into `java.*`. If api-impl calls a method only libcore
   adds to a JDK class, the fix is in atlas's compilation, and
   `tools/JdkRefCheck.java` (run by `build-shim.sh`) catches it at build time.
-- The launcher is an atlas meson target (`$ATLAS_DIR/src/main-executable-hotspot/`,
-  `android-translation-layer-hotspot`), built and installed by `build-atlas.sh`;
-  `launcher/` here holds only the decision note and `smoke-test.sh`. Edit the
-  launcher in atlas and commit it there. Reason in `launcher/README.md`:
-  `libtranslation_layer_main.so` *imports* `apk_path`, `atl_window`,
-  `get_app_data_dir` and the `bionic_*` calls from its executable.
+- The launcher is atlas meson targets (`$ATLAS_DIR/src/main-executable-hotspot/`,
+  `android-translation-layer-hotspot` and `-image`), built and installed by
+  `build-atlas.sh`; `launcher/` here holds only the decision note and the two
+  smoke tests. Edit the launcher in atlas and commit it there. Reason in
+  `launcher/README.md`: `libtranslation_layer_main.so` *imports* `apk_path`,
+  `atl_window`, `get_app_data_dir` and the `bionic_*` calls from its executable —
+  which is also why `-rdynamic` on either target is load-bearing, and why a
+  missing one is a startup crash rather than a link error.
+- One `main.c`, two VM backends behind `vm.h`: `vm_hotspot.c` links `libjvm.so`
+  and assembles a class path, `vm_image.c` `dlopen`s a native-image `.so` and
+  assembles no `-Djava.class.path`, `-agentlib:`, `-XX:` or `--add-opens` at all.
+  Both define `create_vm`, so the meson source lists are the only thing keeping
+  them out of one binary. Anything that must reach both goes in `vm_common.c`.
+  The launcher reads its `-D` properties back out of `java.lang.System` and
+  reports what arrived; it never writes one back, because on HotSpot that would
+  overwrite a value the JVM normalised.
+- `PORT_LAUNCHER` (`hotspot`|`image`) picks the backend for a run and `env.sh`
+  derives `$PORT_LAUNCHER_BIN` from it. A script that boots through `run.sh` must
+  name the launcher that way, or its `[ -x ]` check and its `pkill` describe a
+  different process than the one it started. A script that hands the launcher a
+  class path (`--run-class`) stays HotSpot-only, and so does `trace-metadata.sh`:
+  an image accepts `-agentlib` and ignores it, so a traced image run would write
+  an empty config and say nothing.
 - Changing a Java signature that has a native peer in atlas needs two ninja
   passes: javac regenerates `src/api-impl-jni/generated_headers/*.h`, but the
   `.so` does not depend on them, so the first build compiles against the stale

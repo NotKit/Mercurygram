@@ -42,6 +42,12 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
+# Tracing is a HotSpot-only operation: an image accepts -agentlib and silently
+# ignores it, so a traced image run would produce an empty config and say
+# nothing. Refuse rather than let the checks below run the wrong binary.
+[ "$PORT_LAUNCHER" = hotspot ] ||
+	{ echo "trace-metadata.sh needs PORT_LAUNCHER=hotspot: an image ignores the agent" >&2; exit 1; }
+
 config_dir="$PORT_OUT/ni-config"
 baseline_dir="$PORT_OUT/ni-config-baseline-boot"
 only=()

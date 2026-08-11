@@ -28,7 +28,8 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-launcher="$ATLAS_OUT/android-translation-layer-hotspot"
+# whatever $PORT_LAUNCHER selects, because the run below goes through run.sh
+launcher="$PORT_LAUNCHER_BIN"
 log="$PORT_OUT/run.log"
 stop_file="$PORT_OUT/.chatlist-done"
 shots="$PORT_OUT/screenshots"

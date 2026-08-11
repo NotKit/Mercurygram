@@ -1,10 +1,20 @@
-# The HotSpot launcher
+# The jar-based launcher
 
 **The launcher lives in atlas, not here**:
-`$ATLAS_DIR/src/main-executable-hotspot/`, built by `build-atlas.sh` as the
-meson target `android-translation-layer-hotspot` and installed next to the
-framework libraries in `out/atlas/`. This directory holds the decision and the
-port's smoke test for it, nothing else.
+`$ATLAS_DIR/src/main-executable-hotspot/`, built by `build-atlas.sh` and
+installed next to the framework libraries in `out/atlas/`. This directory holds
+the decision and the port's smoke tests for it, nothing else.
+
+It is two meson targets over one `main.c`, differing only in where the VM comes
+from (`vm.h` is the interface, `vm_common.c` the shared option assembly):
+
+| target | VM backend | built from |
+| --- | --- | --- |
+| `android-translation-layer-hotspot` | `libjvm.so`, linked | `vm_hotspot.c` |
+| `android-translation-layer-image` | a GraalVM native-image `.so`, `dlopen`ed | `vm_image.c` |
+
+The directory keeps its `-hotspot` name because `linux-port/CLAUDE.md`, this
+file and `../README.md` point at it; renaming it buys nothing.
 
 ## Why it is in atlas
 
@@ -49,10 +59,44 @@ Dropped on purpose: `init__r_debug` and `dl_parse_library_path` (bionic linker),
 `--install`/`--instrument`.
 
 Properties the launcher sets: `Build.VERSION.SDK_INT` (28 by default,
-`--sdk-int`), `atl.apk.path`, `atl.data.dir`, `atl.app.id`,
-`--add-opens=java.base/java.io=ALL-UNNAMED`, and `user.language` /
-`user.country` taken from the environment before `LC_ALL` is forced to
-`C.UTF-8` the way Android has it.
+`--sdk-int`), `atl.apk.path`, `atl.framework.res.path`, `atl.data.dir`,
+`atl.app.id`, `java.library.path`, and `user.language` / `user.country` taken
+from the environment before `LC_ALL` is forced to `C.UTF-8` the way Android has
+it. Both backends assemble exactly that set (`vm_common_properties`) and both
+read every one of them back out of `java.lang.System` afterwards, printing
+`vm property: <key>=<value> (from -D)` per property — so "the VM accepted the
+option" and "Java can read it" never have to be assumed to be the same thing.
+The read-back only reads. One of the launcher's own properties not arriving
+exits 1; a `-X -D` of the caller's that the VM normalised (HotSpot rewrites
+`sun.jnu.encoding`) is reported as `(the VM's own value, -D asked for …)` and
+left alone.
+`--add-opens=java.base/java.io=ALL-UNNAMED` (the compat shim needs it) is
+HotSpot-only: an image accepts it at VM creation and does nothing with it, so
+there it has to be a `native-image` *build* argument instead.
+
+## The image backend
+
+`android-translation-layer-image` takes the same argv and runs the same boot
+sequence; what it does not do is assemble a class path. No
+`-Djava.class.path`, no `-agentlib:*`, no `-XX:*`, no `-Xcheck:jni`, no
+`--add-opens` — an image has none of them, and `-XX:` is the one namespace where
+a bad option kills VM creation with no diagnostic at all. `--api-impl-jar`,
+`--classpath`, `$JDWP_LISTEN` and `$ATL_CHECK_JNI` are warned about rather than
+refused, so one command line drives both launchers.
+
+The image is `dlopen`ed, never linked: it is built *from* atlas's own
+`api-impl.jar` (`linux-port/build-image.sh`), it is rebuilt far more often than
+the launcher, and the launcher has to be testable against a stub image before a
+real one exists. `--vm-library PATH` (or `$ATL_IMAGE_LIB`) says which `.so`; the
+resolved path is printed as `image: opened …`, which is the only honest record
+of where the VM came from. `ldd` on the binary shows no `libjvm.so` and
+`nm -D --undefined-only` no `JNI_CreateJavaVM`; `build-atlas.sh` asserts both.
+
+`--vm-check CLASS` runs that class's `main(String[])` the moment the VM exists
+and exits — before `FindClass("android/view/Display")`, the handle cache, the
+window and the looper, i.e. before anything that needs api-impl. That is what
+makes it a test of a VM backend rather than of the runtime the app needs, and
+what `--run-class` cannot be.
 
 ## Running it
 
@@ -71,10 +115,25 @@ linux-port/launcher/smoke-test.sh  # exits 0 when the runtime is up
 libraries as a real run — instead of creating the application, then exits with
 its status. `linux-port/check-native-loader.sh` runs on it.
 
+`image-smoke-test.sh` is the same idea for the image launcher, and says up front
+what a stub image cannot prove: atlas's own `--smoke-test` needs api-impl inside
+the image, so it belongs to the real image build. What it does prove is the VM backend — the
+`dlopen`, `JNI_CreateJavaVM`, every `-D` readable from Java, a static method
+called inside the isolate, and no `libjvm.so` mapped in the process, read from
+inside it. It runs the identical `--vm-check` on HotSpot first, so a failure
+separates a wrong harness from a wrong image before any debugging starts.
+
+```sh
+linux-port/build-image.sh --stub         # ~30 s, one class
+linux-port/launcher/image-smoke-test.sh  # both launchers, same class
+```
+
 `display.sh` holds the two things every run script here needs and nothing else:
 `port_start_display` (an `Xvfb` when the session has no display) and
 `port_screenshot`.
 
 `libjvm.so` is not on the default loader path and the launcher's RUNPATH is
-deliberately `$ORIGIN` only, so any run needs
-`LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT`.
+deliberately `$ORIGIN` only, so any HotSpot run needs
+`LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$ATLAS_OUT`. An image run gets the image's
+directory instead of `lib/server`, on purpose: nothing in that process may be
+able to find a `libjvm.so` even by accident.

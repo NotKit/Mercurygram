@@ -13,6 +13,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 source "$PORT_DIR/launcher/display.sh"
 
+# the HotSpot launcher by name, not $PORT_LAUNCHER_BIN: this one drives the
+# launcher directly with a class path, which an image has no notion of
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
 native_lib="$PORT_OUT/libtmessages.so"
 tools_out="$PORT_OUT/tools"

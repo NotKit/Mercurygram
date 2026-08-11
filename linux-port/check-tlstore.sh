@@ -30,6 +30,8 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# the HotSpot launcher by name, not $PORT_LAUNCHER_BIN: this one drives the
+# launcher directly with a class path, which an image has no notion of
 launcher="$ATLAS_OUT/android-translation-layer-hotspot"
 tools_out="$PORT_OUT/tools"
 app_jar="$PORT_OUT/classpath/TMessagesProj.jar"

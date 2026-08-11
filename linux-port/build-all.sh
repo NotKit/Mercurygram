@@ -30,9 +30,10 @@ STEPS=(
 	"ffmpeg|ffmpeg"
 	"tmessages|the app's JNI library, glibc, no voip"
 	"classpath|app jars and app.apk from Gradle"
-	"atlas|the atlas framework and the HotSpot launcher"
+	"atlas|the atlas framework and both launchers"
 	"shim|the libcore/dalvik compat shim"
 	"checks|atlas class checks with the shim, then NativeLoader and apk extraction"
+	"image|the stub native image the image-backed launcher is tested against "
 )
 
 clean=""
@@ -117,6 +118,26 @@ step_checks() {
 	# so the image gets metadata for all of them and not just the two a session
 	# happens to take.
 	"$PORT_DIR/check-tlstore.sh"
+}
+
+step_image() {
+	# The *stub* image only: it is ~80 s and one class, and it is what keeps
+	# android-translation-layer-image honest. The real image (build-image.sh with
+	# no flag) is not part of the port's build order -- it costs ~107 s and 3.5 GB,
+	# and the click ships jlink (FR-2).
+	# FR-6, the same guard build-image.sh itself has: native-image cannot cross
+	# compile, and $GRAALVM_HOME exists on a cross host too, so testing for the
+	# tool alone would walk a PORT_ARCH=arm64 build straight into that error.
+	if [ "$PORT_CROSS" = 1 ]; then
+		echo "cross build: no native image (native-image is x86_64-only), skipping"
+		return 0
+	fi
+	if [ ! -x "$GRAALVM_HOME/bin/native-image" ]; then
+		echo "no native-image at $GRAALVM_HOME (see check-graalvm.sh), skipping"
+		return 0
+	fi
+	"$PORT_DIR/build-image.sh" --stub
+	"$PORT_DIR/launcher/image-smoke-test.sh"
 }
 
 # --- run them ---------------------------------------------------------------

@@ -6,7 +6,10 @@
 # -> Application.onCreate -> Activity.createMainActivity -> GLib main loop.
 #
 # Usage: linux-port/run.sh [--seconds N] [--stop-file PATH] [--data-dir DIR]
-#                          [--fresh] [--gpu] [--tl-dump] [-- ARGS...]
+#                          [--fresh] [--gpu] [--tl-dump] [--image] [-- ARGS...]
+#   --image       run the image-backed launcher against $PORT_IMAGE_LIB instead
+#                 of the HotSpot one. $PORT_LAUNCHER=image does the
+#                 same, which is how check-*.sh select it without an edit.
 #   --seconds N   quit after N seconds and check run.log (0 = run until closed)
 #   --stop-file   with --seconds, quit as soon as this file appears; the timeout
 #                 becomes the maximum. Lets a driving script end the run when it
@@ -40,10 +43,13 @@ data_dir="${ANDROID_APP_DATA_DIR:-$PORT_OUT/data}"
 fresh=0
 gpu=0
 tl_dump=0
+image=0
+[ "${PORT_LAUNCHER:-hotspot}" != image ] || image=1
 extra_args=()
 
 while [ $# -gt 0 ]; do
 	case "$1" in
+	--image) image=1; shift ;;
 	--seconds) seconds="$2"; shift 2 ;;
 	--stop-file) stop_file="$2"; shift 2 ;;
 	--data-dir) data_dir="$2"; shift 2 ;;
@@ -75,7 +81,11 @@ done
 [ "${#extra_jvm_opts[@]}" = 0 ] ||
 	echo "extra JVM options from \$PORT_EXTRA_JVM_ARGS: ${extra_jvm_args[*]}"
 
-launcher="$ATLAS_OUT/android-translation-layer-hotspot"
+# --image is $PORT_LAUNCHER=image for one run; the name is never defaulted back
+# to hotspot, so a mistyped $PORT_LAUNCHER fails the -x check below instead of
+# running the other launcher and proving nothing
+[ "$image" = 0 ] || PORT_LAUNCHER=image
+launcher="$ATLAS_OUT/android-translation-layer-$PORT_LAUNCHER"
 native_lib="$PORT_OUT/libtmessages.so"
 log="$PORT_OUT/run.log"
 shots="$PORT_OUT/screenshots"
@@ -92,8 +102,15 @@ mkdir -p "$shots"
 mkdir -p "$data_dir"
 export ANDROID_APP_DATA_DIR="$data_dir"
 
-# libjvm.so is deliberately not in the launcher's RUNPATH
-export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ "$image" = 1 ]; then
+	# no $JAVA_HOME/lib/server on purpose: nothing in this process may be able to
+	# find a HotSpot libjvm.so even by accident, which is half of the
+	# "no libjvm.so in the process" evidence
+	export LD_LIBRARY_PATH="$(dirname "$PORT_IMAGE_LIB"):$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+	# libjvm.so is deliberately not in the launcher's RUNPATH
+	export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$ATLAS_OUT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 # CPU raster: atlas's Ganesh path dies in skia's GrGLExtensions::init before it
 # ever returns a context, on llvmpipe and on hardware GL alike. --gpu to retry.
@@ -111,6 +128,19 @@ export ANDROID_LOG_TAGS="${ANDROID_LOG_TAGS:-*:V}"
 tl_dump_opts=()
 [ "$tl_dump" = 1 ] || tl_dump_opts=(-X "-Dtmessages.tldump=0")
 
+# -XX:ErrorFile is the one option in this set an image rejects, and an image
+# writes no hs_err file for it to name anyway. A rejected option aborts VM
+# creation with no diagnostic at all, so it is gated rather than left to luck.
+launcher_opts=()
+if [ "$image" = 1 ]; then
+	[ -f "$PORT_IMAGE_LIB" ] ||
+		{ echo "no image at $PORT_IMAGE_LIB (run build-image.sh)" >&2; exit 1; }
+	launcher_opts=(--vm-library "$PORT_IMAGE_LIB")
+	echo "running the image-backed launcher against $PORT_IMAGE_LIB"
+else
+	launcher_opts=(-X "-XX:ErrorFile=$PORT_OUT/hs_err_pid%p.log")
+fi
+
 port_start_display
 
 run_launcher() {
@@ -125,7 +155,7 @@ run_launcher() {
 		--library-path "$PORT_OUT" \
 		--launch-activity org.telegram.ui.LaunchActivity \
 		-X "-Dtmessages.native.path=$native_lib" \
-		-X "-XX:ErrorFile=$PORT_OUT/hs_err_pid%p.log" \
+		"${launcher_opts[@]}" \
 		${tl_dump_opts[@]+"${tl_dump_opts[@]}"} \
 		${extra_jvm_opts[@]+"${extra_jvm_opts[@]}"} \
 		"${extra_args[@]}" \
@@ -154,12 +184,23 @@ launcher_pid=$!
 # The screenshot is the last thing before the kill, so the UI has had the whole
 # run to draw.
 waited=0
+launcher_maps=""
 while [ "$waited" -lt "$((seconds * 2))" ]; do
 	[ -n "$stop_file" ] && [ -e "$stop_file" ] && break
+	# What the process actually has mapped: ldd on the launcher cannot see a
+	# dlopened image, and it is the third piece of that evidence. Taken during the run
+	# and kept, because /proc/<pid>/maps is gone the moment the launcher exits --
+	# read only after the loop, a run that ends early would leave the check with
+	# nothing and silently skip it.
+	if [ "$image" = 1 ] && ! grep -qF "$PORT_IMAGE_LIB" <<<"$launcher_maps"; then
+		launcher_maps=$(cat "/proc/$launcher_pid/maps" 2>/dev/null || echo "$launcher_maps")
+	fi
 	kill -0 "$launcher_pid" 2>/dev/null || break
 	sleep 0.5
 	waited=$((waited + 1))
 done
+maps_now=$(cat "/proc/$launcher_pid/maps" 2>/dev/null || true)
+[ -z "$maps_now" ] || launcher_maps="$maps_now"
 port_screenshot "$shots/run.png"
 # SIGTERM first, but do not leave a launcher behind if it ignores it: the next
 # build would fail to overwrite the running binary.
@@ -197,17 +238,44 @@ for opt in ${extra_jvm_args[@]+"${extra_jvm_args[@]}"}; do
 	}
 done
 
-for expected in \
-	"JVM launched successfully" \
-	"boot: Application.onCreate returned" \
+expected_lines=(
+	"JVM launched successfully"
+	"boot: Application.onCreate returned"
 	"boot: main activity started"
-do
+)
+# On the image path, which .so provided the VM and whether the properties
+# crossed into Java are the two things that cannot be taken on trust.
+[ "$image" = 0 ] || expected_lines+=(
+	"image: opened $PORT_IMAGE_LIB"
+	"vm property: atl.apk.path=$PORT_OUT/app.apk"
+)
+for expected in "${expected_lines[@]}"; do
 	grep -qF "$expected" <<<"$log_text" || {
 		echo "run.log has no '$expected'" >&2
 		tail -40 "$log" >&2
 		exit 1
 	}
 done
+
+if [ "$image" = 1 ]; then
+	# never "no maps, so nothing to check": that is how an assertion stops
+	# running without anyone noticing (FR-8)
+	[ -n "$launcher_maps" ] || {
+		echo "could not read /proc/$launcher_pid/maps at any point in the run," \
+		     "so the no-libjvm.so evidence is missing" >&2
+		exit 1
+	}
+	if grep -q "libjvm\.so" <<<"$launcher_maps"; then
+		echo "the image run had libjvm.so mapped:" >&2
+		grep "libjvm\.so" <<<"$launcher_maps" >&2
+		exit 1
+	fi
+	grep -qF "$PORT_IMAGE_LIB" <<<"$launcher_maps" || {
+		echo "$PORT_IMAGE_LIB was never mapped into the launcher process" >&2
+		exit 1
+	}
+	echo "maps: $PORT_IMAGE_LIB mapped, no libjvm.so"
+fi
 
 if grep -qF "A fatal error has been detected" <<<"$log_text"; then
 	echo "the JVM crashed:" >&2

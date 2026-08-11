@@ -32,9 +32,27 @@ export GRAALVM_HOME="${GRAALVM_HOME:-/home/nekit/UT/graalvm-ce-21}"
 export PORT_OUT="${PORT_OUT:-$PORT_DIR/out}"
 export PORT_NATIVE_OUT="$PORT_OUT/native"
 
+# The native-image shared library the image launcher creates its VM from
+# (build-image.sh), and which launcher the run scripts pick: hotspot|image.
+# Both live here rather than in each script so a driving script can select the image path
+# with an environment variable instead of a patch to every check-*.sh.
+export PORT_IMAGE_LIB="${PORT_IMAGE_LIB:-$PORT_OUT/image/libmercurygram.so}"
+export PORT_LAUNCHER="${PORT_LAUNCHER:-hotspot}"
+# a typo here must not quietly mean "hotspot": the name goes into
+# $PORT_LAUNCHER_BIN below, so the run scripts fail on a launcher that is not there
+case "$PORT_LAUNCHER" in
+hotspot|image) ;;
+*) echo "env.sh: unsupported PORT_LAUNCHER '$PORT_LAUNCHER' (hotspot or image)" >&2 ;;
+esac
+
 # atlas builds into out/, so `--clean` never touches the sources.
 export ATLAS_BUILDDIR="${ATLAS_BUILDDIR:-$PORT_OUT/atlas-build}"
 export ATLAS_OUT="${ATLAS_OUT:-$PORT_OUT/atlas}"
+
+# The binary $PORT_LAUNCHER selects. A script that runs the app through run.sh
+# has to name it this way: run.sh honours $PORT_LAUNCHER, so a hardcoded path
+# would check one binary, run another, and kill neither.
+export PORT_LAUNCHER_BIN="$ATLAS_OUT/android-translation-layer-$PORT_LAUNCHER"
 
 # Target architecture of every native product: x86_64 is the desktop port, arm64
 # the Ubuntu Touch click (linux-port/click/), which cross-compiles.

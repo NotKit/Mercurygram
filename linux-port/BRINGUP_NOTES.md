@@ -2217,3 +2217,667 @@ Open, in the order they would bite:
   retries, and holds every opened `JarFile` in a static field for the life of the
   process. If `build-image.sh` ever puts it on `--initialize-at-build-time`, a
   live `ZipFile` in the image heap fails the build.
+
+## The image-backed launcher, measured
+
+Both trees dirty at the time of writing; nothing here is inferred from an
+earlier session's log, every number was re-run from the current sources.
+
+### What was built
+
+atlas gained a second executable over the *same* `main.c`. The VM backend is a
+per-target source file behind `src/main-executable-hotspot/vm.h`, the way atlas
+already expresses "same launcher, different runtime" with `bionic_compat.c` vs
+`glibc_compat.c`:
+
+| target | backend file | VM |
+| --- | --- | --- |
+| `android-translation-layer-hotspot` | `vm_hotspot.c` | `libjvm.so`, linked, class path assembled |
+| `android-translation-layer-image` | `vm_image.c` | a native-image `.so`, `dlopen`ed, no class path at all |
+
+`vm_common.c` holds what must reach both: the `-D` set, the `jvm option:` echo
+`run.sh` greps, and `vm_verify_properties()`, which reads every `-Dkey=value`
+back out of `java.lang.System` and prints the value that arrived. It only reads:
+see "the read-back does not repair" below. Both backends define `create_vm`, so
+the two meson source lists are the only thing keeping them out of one binary.
+
+The `image-launcher` meson option is `value: 'auto'` on purpose: `build-atlas.sh`
+stamps the builddir with `"$JAVA_HOME $PORT_TRIPLE ${setup_args[*]}"`, so adding
+`-Dimage-launcher=enabled` to `setup_args` would change the stamp and force
+`meson setup --wipe` — which rebuilds skia. Nothing is passed to `meson setup`;
+ninja's own regen picked the new target up.
+
+### The acceptance criteria, and the one that is not reachable
+
+`ldd` on the image launcher: no `libjvm.so` anywhere, and nothing `not found`
+(the HotSpot binary legitimately shows `libjvm.so => not found`). `nm -D
+--undefined-only` has no `JNI_CreateJavaVM` at all, where the HotSpot one has
+`JNI_CreateJavaVM@SUNWprivate_1.1` — the `dlopen` design, asserted rather than
+described. `build-atlas.sh` now checks all three on every build.
+
+FR-5 holds on the new target. `libtranslation_layer_main.so` imports **sixteen**
+launcher-shaped symbols, not eleven: `apk_path`, `atl_window`,
+`get_app_data_dir` and thirteen `bionic_*`. Eleven of them are defined by each
+launcher with identical `B`/`T` bindings; the other five
+(`bionic_eglChooseConfig`, `bionic_eglCreatePbufferSurface`,
+`bionic_eglGetCurrentSurface`, `bionic_eglPresentationTimeANDROID`,
+`bionic_eglQuerySurface`) are defined by `libandroid.so.0`, which is a
+`DT_NEEDED` of the library itself — so they resolve, from the other provider,
+and always did. `-rdynamic` is therefore not cosmetic on the new target, and
+`build-atlas.sh`'s symbol loop now runs over both binaries with the import list
+read out of the library rather than hardcoded, so a dropped `-rdynamic` fails
+the build instead of crashing at startup.
+
+**The third criterion as literally worded is not reachable with a stub, and is
+not claimed.** atlas's own `--smoke-test` fires only after `FindClass`
+`android/view/Display`, `android/atl/ATLRuntime` + `System.load` of
+`libtranslation_layer_main.so`, `set_up_handle_cache`, `atl_window_new` and
+`prepare_main_looper`, and then calls `android.os.SystemClock.uptimeMillis()`,
+whose peer is in `libtranslation_layer_main.so`. Every one of those needs
+api-impl inside the image. It moves to the real image build.
+
+What replaces it is `--vm-check CLASS`, ~15 lines in `main.c` that run a class's
+`main(String[])` the moment the VM exists and exit — before any framework setup,
+so it works against a VM containing nothing but that class. `--run-class` cannot
+serve: it fires after the handle cache, the window and the looper.
+
+### The stub, and the numbers
+
+`build-image.sh --stub` -> `out/image-stub/libatl-vm-stub.so`, 14,775,808 B, in
+32 s wall (native-image's own line: 29.5 s), peak RSS 0.82 GB, for one class.
+Deliberately not named `libmercurygram.so`, so a stub can never be mistaken for
+the real image or picked up by `$PORT_IMAGE_LIB`. Its `jni-config.json` is a
+heredoc fixture, not metadata: FR-4 governs `out/ni-config`, which no script
+here touches.
+
+`launcher/image-smoke-test.sh` runs the identical `--vm-check VmCheck` command
+on both launchers, HotSpot first, so a failure separates a wrong harness from a
+wrong image. Both pass; two logs, `out/image-smoke-hotspot.log` and
+`out/image-smoke.log`.
+
+### The PRD's first open question, answered: `-D` works, all of it
+
+> does `JNI_CreateJavaVM` in an image accept the launcher's options, or must the
+> launcher filter down to nothing?
+
+**10 options passed, 10 accepted, all 10 readable back from Java with the value
+they were given.** `launcher/image-smoke-test.sh` asserts that count rather than
+printing it: `jvm option: -D…` lines in, `vm property: … (from -D)` lines out,
+and the run fails if they differ. Every one is readable *inside the image*
+(`VmCheck` prints them from the other side of JNI):
+
+```
+image: VM created with 10 options
+JVM launched successfully
+vm property: Build.VERSION.SDK_INT=28 (from -D)
+vm property: atl.apk.path=.../out/app.apk (from -D)
+vm property: atl.framework.res.path=.../out/atlas/framework-res.apk (from -D)
+vm property: atl.data.dir=.../out/image-smoke-data/app.apk_/ (from -D)
+vm property: atl.app.id=com.example.demo_application (from -D)
+vm property: java.library.path=... (from -D)
+vm property: tmessages.native.path=.../out/libtmessages.so (from -D)
+vm property: tmessages.tldump=0 (from -D)
+vm check: alive on Substrate VM 21.0.2+13
+vm check: libjvm.so mapped: no
+vm check: mapped: .../out/image-stub/libatl-vm-stub.so
+vm check: all 5 required properties reached Java
+```
+
+So the launcher keeps the whole `-D` block verbatim on the image path. What it
+drops is only what an image has no notion of: `-Djava.class.path`,
+`-agentlib:*`, `-XX:*`, `-Xcheck:jni`, `--add-opens`. `--api-impl-jar`,
+`--classpath`, `$JDWP_LISTEN` and `$ATL_CHECK_JNI` are warned about, not
+refused, so one argv drives both launchers.
+
+`vm_verify_properties()` runs on the HotSpot path too, and tracing it there is
+the only way `java.lang.System` gets into `jni-config.json` (it is not there
+today, while `android.view.Display`, `android.atl.ATLRuntime`,
+`android.content.Context`, `android.app.Activity` and
+`android.content.ContentProvider` are).
+
+**The read-back does not repair.** An earlier shape of this function called
+`System.setProperty` whenever the value read back differed, which on HotSpot is
+a write, not a check: `java -Dsun.jnu.encoding=XYZ` reports `UTF-8`, because the
+JVM refuses the value, and the launcher was putting `XYZ` back. It now reports
+what arrived and changes nothing. A miss is fatal only for the properties the
+launcher assembles itself (the framework cannot boot without them); a caller's
+`-X -Dkey=value` that the VM normalised is printed as
+`vm property: sun.jnu.encoding=UTF-8 (the VM's own value, -D asked for XYZ)` and
+the run carries on.
+
+### `ignoreUnrecognized = JNI_TRUE` on the image path, and why
+
+The HotSpot backend keeps `JNI_FALSE`, bit-identically. The image backend uses
+`JNI_TRUE`, and both halves are measured. On an image the flag governs the
+`-XX:` namespace and nothing else: every other string is accepted regardless,
+and an unknown or unparsable `-XX:` name is otherwise fatal — *fatal and
+silent*, `JNI_CreateJavaVM` returning `JNI_ERR` having named neither the option
+nor a reason. There is no recovery: a second `JNI_CreateJavaVM` in the same
+process after a failed one hangs (GraalVM CE 21.0.2), so the two-stage
+"retry with no options" ladder the plan proposed is not available.
+
+Verified with a deliberate `-X -XX:NoSuchOptionAtAll=1` through `run.sh`'s own
+escape hatch: `image: VM created with 9 options`, `vm check: alive on Substrate
+VM 21.0.2+13`, exit 0. Nothing is lost, because the image path assembles no
+`-XX:` itself and a `-D` cannot be in that namespace. The launcher does *not*
+claim "none rejected" — with `JNI_TRUE` a bad `-XX:` is dropped silently and the
+image reports neither, so the honest evidence is the per-property read-back, not
+the option count.
+
+### Two `main.c` fixes the split turned up
+
+- `load_translation_layer`'s failure hint named `--api-impl-jar`, an option the
+  image ignores. It now names neither backend's cause as if it were the only one.
+- `FindClass("android/view/Display")` had no exception check, so a VM without the
+  framework reported the *next* miss (`android.atl.ATLRuntime`) and read as a
+  broken `--api-impl-jar`. Checked now, which is what makes a stub run through
+  `run.sh --image` say what is actually wrong. Cannot fire on a working HotSpot
+  boot; re-verified below.
+
+### FR-2: the HotSpot path, re-run from these sources
+
+`run.sh --seconds 25`: exit 0, "run ok: booted to the main activity, no uncaught
+exceptions in 25s", `JVM launched successfully` at line 14, `boot: application
+created`, `boot: content providers created`, `boot: Application.onCreate
+returned`, `boot: main activity started`, and 0 lines matching
+`^(error: exception during|Exception in thread|uncaught exception)`.
+`launcher/smoke-test.sh`: "smoke test passed: JVM booted, translation layer
+loaded, 960px window, clean exit". `build-atlas.sh`'s own class checks
+(`PortClassCheck`, 2761 `ViewSignatureCheck` views) all pass.
+
+The visible change on the HotSpot path is eleven new
+`vm property: <key>=<value> (from -D)` lines in `out/run.log`, all eleven saying
+`(from -D)` on a real boot. It is not purely additive: a launcher-assembled
+property that does not arrive now exits 1 inside `create_vm` — deliberately, it
+is the assertion the image path needs — and a caller `-X -D` the VM normalises
+prints a line saying so. Option *order* moved slightly — `--add-opens` now sits
+after the locale pair instead of before it — which no consumer depends on.
+
+### What the real image must not get wrong
+
+Both measured on a probe image, not assumed:
+
+- `--add-opens=java.base/java.io=ALL-UNNAMED` must be a `native-image` **build**
+  argument. Passed at VM creation an image accepts it and does nothing:
+  `FileDescriptor.class.getDeclaredField("fd").setAccessible(true)` throws
+  `InaccessibleObjectException`, so `FileDescriptorUtils.FD_FIELD` would be null
+  and `AssetManager.openFd`, `Parcel` and `ParcelFileDescriptor` would all throw.
+  Rebuilding the probe *with* the build-time flag made the identical code print
+  `fd field accessible, value=1`, at a cost of ~2 s and 4 kB. `build-image.sh
+  --stub` already passes it; the full build must too.
+- `org.telegram.messenger.FileLog` must never go on
+  `--initialize-at-build-time`. Measured both ways on a class shaped exactly like
+  it: with run-time initialisation (the default) `-Dtmessages.tldump=0` arrives
+  and the dumper stays off; with the class initialised at build time the same
+  `-D` reads back `null` and the dumper turns back **on**, which reflects over
+  all of `TLRPC$*` and voids the dumper removal's whole reduction. Same hazard class for
+  `android.os.Build$VERSION` / `android.os.SystemProperties` (they would bake the
+  build host's `SDK_INT`) and for `android.content.res.AssetManager` (a live
+  `ZipFile` in the image heap fails the build outright).
+
+Also, from the same probe: `-agentlib:native-image-agent` is accepted and
+silently ignored by an image, so tracing stays a HotSpot-only operation — `--image`
+and `trace-metadata.sh` do not compose. `-Djava.class.path` is accepted and the
+property is set, but it does not affect class loading (closed world), and it
+reads as the empty string when unset. `JNI_GetDefaultJavaVMInitArgs` reports
+`JNI_VERSION_1_8` and the `version` field is not validated at all, so
+`main.c`'s `JNI_VERSION_1_8` needs no change.
+
+### Left open by the launcher work
+
+- `run.sh --image` is wired end to end (launcher selection, no
+  `$JAVA_HOME/lib/server` on `LD_LIBRARY_PATH`, `--vm-library`, the
+  `/proc/<pid>/maps` read while the process is alive) but cannot boot until a
+  real image exists. Against the stub it now stops at the first honest error,
+  `error: exception during looking up android.view.Display`, which is the real image's problem.
+- `PORT_LAUNCHER=image` selects the image in `run.sh`, and in the four checks
+  that boot through `run.sh` (they take `$PORT_LAUNCHER_BIN` from `env.sh`, so
+  their `[ -x ]` precondition and their `pkill` follow whatever ran). The four
+  `--run-class` checks still name the HotSpot binary on purpose: they hand the
+  launcher a class path, which an image has no notion of. Making those work is
+  a parity-check job.
+- `transplant-session.sh` was **not** hotspot-only, contrary to an earlier note
+  here: its exe filter is `android-translation-layer*` (line 102) and its other
+  two arms scan fds and cwds, so an image launcher is caught. `trace-metadata.sh`
+  does kill by the hotspot path (line 162), which is correct now that it refuses
+  to run with `PORT_LAUNCHER=image` — an image ignores `-agentlib` silently, so
+  a traced image run would produce an empty config and say nothing.
+- `jni-config.json` has no `java.lang.System` and no `android.os.SystemClock`
+  entry, both of which the launcher itself looks up by name. The fix is a trace
+  that exercises them (FR-4), not a hand edit: `vm_verify_properties` now runs on
+  the HotSpot path so the first is traceable, and adding `launcher/smoke-test.sh`
+  to `trace-metadata.sh`'s check list would cover the second.
+
+## Launcher review: what the two reviews changed, and the state it landed in
+
+Two reviews ran over the section above — an acceptance check and an adversarial
+regression pass. Thirteen findings between them; this is the disposition and the
+re-run evidence, all of it from the sources as committed (atlas
+`mercurygram/openjdk-port`, this repo `ralph/graalvm-native-image`), on
+2026-08-11.
+
+### The one that was a real regression on the HotSpot path
+
+`vm_verify_properties()` did not only read the properties back. When a value
+read back differently it called `System.setProperty` and wrote the command-line
+value into the running VM. On HotSpot that is a mutation of a path FR-2 says
+must not change: `java -Dsun.jnu.encoding=XYZ -XshowSettings:properties` prints
+`sun.jnu.encoding = UTF-8`, because the JVM refuses the value, and the launcher
+was putting `XYZ` back.
+
+It reads and reports now, never writes. The keys the launcher assembles itself
+are recorded from `vm_common_properties()`'s own output (so a property added
+there cannot be left out of the check), and only those are fatal when they do
+not arrive — the framework cannot boot without them. Anything the caller passed
+with `-X -D` is the caller's, and a VM that normalised it says so:
+
+```
+jvm option: -Dsun.jnu.encoding=XYZ
+vm property: sun.jnu.encoding=UTF-8 (the VM's own value, -D asked for XYZ)
+vm check: alive on OpenJDK 64-Bit Server VM 21.0.11+10-1-deb13u2-Debian
+```
+
+exit 0, where the same command previously reported `sun.jnu.encoding=XYZ (set
+through System.setProperty)`. The stub image's `jni-config.json` fixture lost
+its `setProperty` entry with it.
+
+### The rest, in the order they would bite
+
+- **`meson.build` could not disable the image target.** The block was guarded by
+  `get_option('image-launcher').allowed()`, true for the default `'auto'`, and
+  the `dependency('jni')` inside it had no `required:`, so it was mandatory: a
+  host without JNI headers failed configure instead of degrading, and
+  `-Dhotspot-launcher=disabled` still built a launcher. It is
+  `dependency('jni', required: get_option('image-launcher'))` now, with the
+  target guarded on `.found()`, which is what the hotspot block does one screen
+  above.
+- **`build-atlas.sh`'s FR-5 check tested a hardcoded eleven names.** The library
+  imports sixteen. The list now comes out of
+  `nm -D --undefined-only libtranslation_layer_main.so`, and a symbol counts as
+  provided if either the launcher or `libandroid.so.0` defines it — which is how
+  the five `bionic_egl*` the launchers do not define have always resolved.
+  Measured after the change: `16` launcher-shaped imports, `11 from the
+  launcher, 5 from libandroid.so.0`, identical for both binaries.
+- **`run.sh`'s "no libjvm.so in the process" assertion could silently not run.**
+  `/proc/<pid>/maps` was read once, after the wait loop, and that loop also ends
+  when the launcher has already exited — an early exit left the variable empty
+  and the whole check was skipped behind `[ -n "$launcher_maps" ]` while the run
+  still printed `run ok`. The snapshot is now taken during the run, kept, and a
+  missing one is `exit 1`. Demonstrated both ways against a `sleep` that ends
+  before the loop does: old shape `0 bytes of maps after the process ended`, new
+  shape `2330 bytes`.
+- **`launcher/image-smoke-test.sh` printed the property counts instead of
+  asserting them.** "10 by -D, 0 by System.setProperty" was an `echo`; nothing
+  failed if a `-D` stopped arriving. It now requires one
+  `vm property: … (from -D)` line per `jvm option: -D…` line, and prints
+  `properties: 10 passed as -D, all 10 readable from Java as themselves`.
+- **`main.c` looked up `java.lang.String` without a check**, in both
+  `--run-class` and `--vm-check`, and handed a possibly-NULL class to
+  `NewObjectArray`. On an image whose `jni-config` omits `java.lang.String` that
+  reports the miss as a failure of whatever ran next — the exact confusion the
+  `android.view.Display` check in this same story exists to prevent. One
+  `empty_string_array()` helper with the check in it, used by both.
+- **`build-all.sh`'s image step guarded on `native-image` being present, not on
+  `PORT_CROSS`.** `native-image` exists on a cross host too, so
+  `PORT_ARCH=arm64 ./build-all.sh` walked into `build-image.sh`'s own FR-6
+  guard. It has the `PORT_CROSS` check now, like every other step that builds
+  something native.
+- **`PORT_LAUNCHER=image` reached `run.sh` and nothing else.** The four checks
+  that boot through `run.sh` (`check-chatlist.sh`, `check-messages.sh`,
+  `check-mtproto.sh`, `check-emoji.sh`) verified one binary, ran another, and
+  their `pkill -f "^$launcher "` could not match what they started. They take
+  `$PORT_LAUNCHER_BIN` from `env.sh` now. The four `--run-class` checks keep
+  naming the HotSpot binary, with a comment saying why: they pass a class path,
+  which an image has no notion of. `trace-metadata.sh` refuses
+  `PORT_LAUNCHER=image` outright — an image accepts `-agentlib` and ignores it,
+  so a traced image run would write an empty config and say nothing. An
+  unknown `PORT_LAUNCHER` no longer falls back to hotspot: `env.sh` warns and
+  the name goes into the path, so `run.sh` says `no launcher at
+  …/android-translation-layer-bogus` and exits 1.
+
+Two findings were rejected as facts, not as concerns. `transplant-session.sh` is
+not hotspot-only (its exe filter is `android-translation-layer*`, line 102, plus
+two name-agnostic arms), and the five `bionic_egl*` symbols neither launcher
+defines are not a hole: `libandroid.so.0`, a `DT_NEEDED` of
+`libtranslation_layer_main.so`, defines all five.
+
+### The numbers, re-measured after the fixes
+
+| | |
+|---|---|
+| `android-translation-layer-hotspot` | 136,568 B |
+| `android-translation-layer-image` | 135,256 B |
+| stub image `out/image-stub/libatl-vm-stub.so` | 14,775,808 B, one class |
+| stub build | 69 s wall on a loaded host (`Finished generating 'libatl-vm-stub' in 1m 7s`), peak RSS **0.88 GB**, 171 GCs |
+| `build-all.sh --only image` (build + smoke test) | 54 s |
+| atlas rebuild for both launchers | 12 ninja targets, no `meson setup --wipe`, no skia |
+
+The stub is one class. Whatever the real image costs, the real build measures from
+scratch; nothing here scales to it.
+
+### What the image VM takes and what it drops
+
+Accepted and delivered, all ten, every time: `-Djava.library.path`,
+`-DBuild.VERSION.SDK_INT`, `-Datl.apk.path`, `-Datl.framework.res.path`,
+`-Datl.data.dir`, `-Datl.app.id`, `-Duser.language`, `-Duser.country`, and the
+two `run.sh` adds through `-X`, `-Dtmessages.native.path` and
+`-Dtmessages.tldump`. That answers the PRD's first open question — *does the
+Invocation API accept the option set the launcher passes, or does the launcher
+have to filter down to nothing?* — with **it accepts all of it**; the launcher
+filters nothing and only omits what an image has no notion of.
+
+Not assembled on the image path, each for a measured reason:
+`-Djava.class.path` (accepted, and the property is set, but class loading is
+closed-world so it does nothing and reads back as the empty string),
+`-agentlib:*` (accepted, silently ignored — so `--image` and
+`trace-metadata.sh` do not compose), `-XX:*` (an unknown name is fatal *and*
+silent, which is why the image backend uses `ignoreUnrecognized = JNI_TRUE`),
+`-Xcheck:jni` (HotSpot), `--add-opens` (accepted, does nothing; on an image it
+has to be a `native-image` build argument).
+
+**`-Dtmessages.tldump=0` reaches the image process.** That was left open by the
+second review of phase 1-2 — `FileLog`'s move off `static final` made the TL
+dumper's correctness depend on the property arriving — and it is now measured
+end to end on the stub: `jvm option: -Dtmessages.tldump=0` →
+`vm property: tmessages.tldump=0 (from -D)` (read back through
+`java.lang.System` from the launcher) → `vm check: tmessages.tldump=0` (printed
+by `VmCheck` from inside the isolate). The caveat that survives is the other
+half of the same finding: this holds because the class reads the property at run
+time. `org.telegram.messenger.FileLog` on `--initialize-at-build-time` would
+read it during the build, get `null`, and turn the dumper back on.
+
+### What the stub smoke test proves, and what it does not
+
+Proves: the launcher `dlopen`s the image and finds `JNI_CreateJavaVM` in it
+(`image: opened …`, and the resolved path, not the requested one);
+`JNI_CreateJavaVM` accepts the option set; every `-D` crosses into Java with the
+value it was given; `FindClass` + `GetStaticMethodID` + `CallStaticVoidMethod`
+work against the isolate (`vm check: VmCheck.main() returned`); and no
+`libjvm.so` is mapped, read from `/proc/self/maps` inside the process. The
+identical `--vm-check VmCheck` command runs on the HotSpot launcher first, so a
+failure separates a wrong harness from a wrong image.
+
+Does not prove: anything about the framework. The launcher's third acceptance
+criterion as written asks for atlas's own `--smoke-test`, which fires only after
+`android/view/Display`, `android/atl/ATLRuntime` + `System.load`,
+`set_up_handle_cache`, `atl_window_new` and `prepare_main_looper`, and then
+calls `android.os.SystemClock.uptimeMillis()`. Against the stub it stops at the
+first of those: `error: exception during looking up android.view.Display`,
+`java.lang.NoClassDefFoundError`, exit 1. That is the real image's starting line. The
+PRD records the criterion as unmet.
+
+The negative controls, so a green run is not a no-op: `--vm-library
+/nonexistent/nope.so` → `error: cannot open the image library …`, exit 1;
+`--vm-check NoSuchClassHere` → `error: exception during looking up the
+--vm-check class`, `NoClassDefFoundError` raised inside
+`com.oracle.svm.core.jni.functions.JNIFunctions.FindClass`, exit 1;
+`--vm-library` on the HotSpot launcher → `error: --vm-library belongs to
+android-translation-layer-image; this launcher links libjvm`, exit 1.
+
+### FR-2, re-run after every fix
+
+`run.sh --seconds 25`: exit 0, "run ok: booted to the main activity, no uncaught
+exceptions in 25s", `JVM launched successfully` at line 14, `boot: application
+created`, `boot: Application.onCreate returned`, `boot: main activity started`,
+0 lines matching `^(error: exception during|Exception in thread|uncaught
+exception)`, and 11 `vm property:` lines of which 11 say `(from -D)`.
+`launcher/smoke-test.sh`: "smoke test passed: JVM booted, translation layer
+loaded, 960px window, clean exit". `check-chatlist.sh` (the check whose launcher
+line changed): exit 0, 129 dialogs, the list scrolled.
+`check-extract-apk.sh` and `check-native-loader.sh`: exit 0.
+`build-atlas.sh`: `all 3 checks passed`, `ok 2761 views can enumerate their
+methods`.
+
+### Open going into the real image build
+
+- **The real image is unbuilt.** `build-image.sh` with no flag prints its inputs
+  and exits 2. `run.sh --image` is wired end to end and stops at
+  `android.view.Display` against the stub.
+- **`--add-opens=java.base/java.io=ALL-UNNAMED` must be a build argument**, and
+  `java.io.FileDescriptor` appears in no file under `out/ni-config`, so nothing
+  will warn about it. Without it `FileDescriptorUtils.FD_FIELD` is null and
+  `AssetManager.openFd`, `Parcel` and `ParcelFileDescriptor` throw.
+- **`FileLog` must stay off `--initialize-at-build-time`**, as must
+  `android.os.Build$VERSION` / `android.os.SystemProperties` (they would bake
+  the build host's `SDK_INT`) and `android.content.res.AssetManager` (a live
+  `ZipFile` in the image heap fails the build outright).
+- **`jni-config.json` still has no `java.lang.System` and no
+  `android.os.SystemClock`**, both looked up by name by the launcher itself. The
+  fix is a trace that exercises them (FR-4), not a hand edit:
+  `vm_verify_properties` now runs on the HotSpot path, so the first is
+  traceable, and adding `launcher/smoke-test.sh` to `trace-metadata.sh`'s check
+  list would cover the second.
+- **The `--run-class` checks are still HotSpot-only** (`check-native-loader.sh`,
+  `check-dump-hprof.sh`, `check-extract-apk.sh`, `check-tlstore.sh`): they hand
+  the launcher a class path. The parity checks decide what their image equivalent is.
+- **A second `JNI_CreateJavaVM` in the same process after a failed one hangs**
+  (GraalVM CE 21.0.2). There is no retry ladder available; a failed image VM
+  creation is the end of the run.
+
+## The first full image, measured
+
+`linux-port/build-image.sh` (no flag) built `out/image/libmercurygram.so` over
+api-impl + shim + the 93 classpath jars on 2026-08-11, atlas
+`mercurygram/openjdk-port` e0ee8e39, GraalVM CE 21.0.2+13.1. Three builds: two
+attempts with one fix between them, then a third re-run after the review's
+script fixes so the shipped `.so` comes from the committed `build-image.sh`. No
+metadata was hand-edited and nothing under `out/ni-config` was touched.
+
+The numbers below are the third build's — `out/image/build-stats.env`,
+`build.log`, `build-argv.txt` and `reports/*_094316.csv` all describe it.
+
+| | |
+|---|---|
+| `out/image/libmercurygram.so` | 247,463,768 B |
+| wall clock | 261 s (`Finished generating 'libmercurygram' in 4m 18s`) |
+| peak RSS, whole process tree | 8,821 MB (native-image's own line: `Peak RSS: 8.57GB`) |
+| builder cap that held | `-J-Xmx12g`, `--parallelism=8` |
+| analysis | 106.7 s @ 3.49 GB; 40,459 reachable types, 189,235 reachable methods |
+| image content | 120.4 MB code (111,689 compilation units), 88.5 MB heap (678,898 objects, 60 resources) |
+| where the code came from | 94.3 MB `TMessagesProj.jar`, 11.7 MB `java.base`, 3.1 MB `api-impl.jar` |
+
+The build repeats: the second build of the same inputs took 262 s and peaked at
+9,050 MB, and its `.so` was 247,467,864 B — 4,096 bytes and ~2.5 % of the peak
+apart. Treat the size and the RSS as ±1 page and ±0.3 GB, not as exact
+constants.
+
+`-J-Xmx12g` was never approached: the builder reported 10.67 GB available and
+peaked at 8.6-9.0 GB, so **12 GB is the working number, not a ceiling that had to
+be found**. This host's swap was already 100 % used before any of these builds
+(20,478 MB, from earlier sessions) and was exactly as full afterwards — the
+builder forced no new paging; free memory bottomed out around 1-2 GB with
+~10 GB still reclaimable from cache, and the machine stayed usable. 8 threads
+gave a CPU load of 5.4-5.6, so the build is not thread-bound and lowering
+parallelism further would cost time without saving much memory.
+
+Not a fallback image, three ways: `--no-fallback` was passed, the build log has
+zero occurrences of `fallback`, and `objdump -p` shows exactly two `DT_NEEDED`
+entries, `libz.so.1` and `libc.so.6` — no `libjvm.so` and no undefined JVM
+symbol. `nm -D` exports `JNI_CreateJavaVM`, `JNI_GetCreatedJavaVMs` and
+`JNI_GetDefaultJavaVMInitArgs`.
+
+### The one fix, and the error that justifies it
+
+`--initialize-at-run-time=org.telegram.messenger.FileLog`. Attempt 1 built the
+`.so` but failed `check_class_initialization` on an observed report line:
+
+```
+org.telegram.messenger.FileLog, BUILD_TIME, class proven as side-effect free before analysis
+```
+
+Honest caveat, because the gate's own message overstates it: `FileLog`'s
+`<clinit>` is property-free as the code stands. The dumper fix moved the
+`tmessages.tldump` read into `tlDumpEnabled()`, which caches into the *mutable*
+`Boolean tlDump` on first use, so a build-time `<clinit>` would not in fact have
+baked the dumper back on. The flag is therefore a guarantee rather than a repair
+of a live bug — it keeps that class's statics answering for the running process
+whatever a later edit does — and it is in the script as a justified default, not
+in `$PORT_IMAGE_INIT_AT_RUNTIME`, so a plain `build-image.sh` is correct.
+`android.os.Build$VERSION` and `android.os.SystemProperties` were `RUN_TIME` on
+their own in every build; the gate is a regression check on them, as designed.
+
+The flag moves *that class*, and nothing else: `FileLog`'s 16 nested classes and
+lambdas (`FileLog$ANRDetector`, `FileLog$TLObjectDeserializer`, nine
+`FileLog$$Lambda…`) are still `BUILD_TIME` in the shipped image. Harmless as the
+code stands — `FileLog.java:108` is the file's only `System.getProperty` and it
+is on the outer class — but the guarantee is narrower than "FileLog is a
+run-time class", so the gate now prints that count on every build.
+
+No other `--initialize-at-run-time`, no `--trace-class-initialization` and no
+substitution was needed. The predicted image-heap violations (a live `JarFile`
+from `AssetManager`, `Thread`, `FileDescriptor`) did not happen:
+`android.content.res.AssetManager` is `BUILD_TIME` by native-image's
+"proven side-effect free" heuristic, and its static state was empty at build
+time, so nothing illegal reached the heap. The shipped image's tally is 33,904
+`BUILD_TIME`, 6,841 `RUN_TIME`, 411 `SIMULATED` and 88 `RERUN` of 41,244 rows;
+that is the 21.0.2 default (`StrictImageHeap` is off) and it held.
+
+`AssetManager` staying build-time is accepted, not fixed. Pinning it would be a
+flag with no observed error behind it, which the image build forbids; what makes it safe
+today is that its `<clinit>` only sets constants, `sSync = new Object()`,
+`apk_paths = null` and an empty `open_apks` map (`AssetManager.java:99,698`). Any
+future `<clinit>` there that reads `atl.apk.path` or opens an apk would bake the
+build host's answer into the image, and the build would not say so — the gate
+reports its kind on every build for exactly that reason.
+
+### What the build warned about and what it means
+
+Eleven `Warning:` lines before stage 1, all from
+`-H:+WarnAboutMissingReflectionOrJNIMetadataElements`, all of them a config
+entry naming something the image classpath does not have. They are the image run's
+list, not build failures:
+
+- `org.telegram.ui.LaunchActivity.onBackPressed()` could not be registered:
+  `NoClassDefFoundError: android/app/PictureInPictureParams`. This one is worth
+  reading twice — `LaunchActivity` is one of the three roots that make the app
+  reachable at all.
+- `android.view.View$AttachInfo`, `android.widget.Editor`,
+  `org.kxml2.io.KXmlSerializer`, `kotlin.reflect.jvm.internal.ReflectionFactoryImpl`,
+  `com.whatsapp.util.Log`: classes in the traced config that api-impl, the shim
+  and the jars do not define.
+- Fields `View.mScrollY`, `PopupWindow.mOnScrollChangedListener`,
+  `ScrollView.mEdgeGlowTop`, `TextView.mCursorDrawableRes`: AOSP-internal
+  fields the app reflects on and atlas's widgets do not have.
+- `sun.security.provider.NativePRNG.<init>(SecureRandomParameters)`.
+
+### The PRD's two open questions, as far as a build can answer them
+
+**"How long, and how much RAM, does analysis over 112 MB of jars take?"**
+Answered, and it is not the blocker it was written up as: **106.7 s at 3.49 GB**
+for the analysis stage, 261 s and 8.8 GB peak for the whole build, on 8 threads
+of a 12-core host with a 12 GB builder cap that was never reached. Per-stage:
+init 9.1 s, analysis 106.7 s, universe 19.3 s, parsing 10.7 s, inlining 5.4 s,
+compiling 61.1 s, layout 26.1 s, image write 16.3 s — 35.2 s of the total in
+220 GCs. A rebuild is therefore a 4.5-minute loop, not an overnight one, which
+is what makes the fix-and-rebuild cycle affordable.
+
+**"Does the image's name-based binding cover the `Java_org_telegram_*`
+symbols with only `jni-config` entries?"** Partly answered, and the question's
+premise is wrong in a useful way. `jni-config` is about *native → Java* lookups;
+a Java → native call needs no entry at all, only for the declaring method to be
+reachable. Of the 13 classes that own an exported symbol, 12 are absent from
+`jni-config` and only `ConnectionsManager` is there — and that is for the
+opposite reason, because native code calls back into it. Measured on
+`out/libtmessages.so`: 129 exported `Java_*` symbols, 96 of them
+`Java_org_telegram_*` across those 13 classes (26 `Utilities`, 13 `Intro`, 23
+`org.telegram.SQLite.*`, 16 `RLottieNative`/`AnimatedFileNative`, …), plus 76
+more methods bound
+by `RegisterNatives` tables (44 in `TgNetWrapper.cpp`, 32 in
+`voip/tg_voip_jni.cpp`) which export no symbol at all. The PRD's "161" is a
+count of neither set; use these numbers.
+
+The image gives no build-time list of what it will bind. `strings` on
+`libmercurygram.so` finds 196 mangled `Java_*` names, all of them `java.base`
+natives that Substrate links statically, and **zero** `Java_org_telegram_*`:
+the app's natives go through `JNINativeLinkage`, which stores the declaring
+class, method name and signature separately and mangles at first call (the
+class and method strings are in the image: `org/telegram/messenger/Utilities`,
+`aesIgeEncryption`, `columnLongValue`). So coverage is a run-time fact by
+construction, and the honest answer stays "running it will tell us" — the first
+image run already got far enough to prove that much of it works (below).
+
+### Review fixes to `build-image.sh` after the first green build
+
+Six defects, all in the script or the write-up, none in the image:
+
+- `--clean` did `rm -rf "$(dirname "$PORT_IMAGE_LIB")"` before any input check.
+  `$PORT_IMAGE_LIB` is an environment override, so that dirname can be
+  `$PORT_OUT` — one `PORT_IMAGE_LIB=out/libmercurygram.so build-image.sh
+  --clean` would have deleted `out/ni-config`, the classpath jars and the apks,
+  i.e. the FR-4 metadata the script exists to consume. It now deletes this
+  build's own products by name and never a directory (reproduced in a scratch
+  tree before and after: the seeded `ni-config` survives).
+- A failed post-build gate left a fresh 247 MB `.so` on disk with nothing
+  marking it rejected, and `run.sh --image` gates only on the file existing —
+  attempt 1 left the tree in exactly that state. A rejected image is now
+  deleted, and `build-stats.env` is removed before the build rather than after
+  a success.
+- The gate matched `grep -F "$class, "` anywhere on a line and took `head -1`.
+  The report's Reason column contains class names too, so an unrelated row could
+  have been read as a hazard's verdict. It is an exact first-column match now
+  (`awk -F', ' '$1 == c'`), verified against attempt 1's report: still exits 1
+  on `FileLog, BUILD_TIME`.
+- Nothing recorded the builder's argv, and `--add-opens=java.base/java.io` in
+  particular leaves no trace in the `.so` or in native-image's output — the one
+  build argument whose absence would only show up as a null `FD_FIELD` at run
+  time. Every build now writes `out/image/build-argv.txt` (16 lines, the `-cp`
+  being one of them). Kept beside the log, not in it, so `grep fallback
+  build.log` still describes the build and not the argv.
+- A second attempt overwrote the first's `build.log`, which is why attempt 1's
+  size and wall clock are no longer checkable (its two `reports/*.csv` survived
+  and do corroborate the failure). The previous log is kept as `build.log.prev`.
+- The write-up said "33,905 of ~40,700 classes" and "ten warnings"; the shipped
+  build has 33,904 of 41,244 and eleven. Corrected above.
+
+Not changed, deliberately: a hazard class that is *absent* from the report does
+not fail the gate. Absent means never initialised in this image, which is the
+one outcome that cannot bake a property in.
+
+### The first image run, unscheduled, for the handoff
+
+`PORT_IMAGE_LIB=… run.sh --image --seconds 25` was run once against the shipped
+image, to hand the image run a starting point rather than a prediction. **The launcher's
+prediction was wrong and the news is good**: nothing died in
+`vm_verify_properties()`. The launcher opened the `.so`, created the VM with 10
+options, read all ten `-D` properties back out of `java.lang.System`
+(`tmessages.tldump=0` among them), `maps:` reported no `libjvm.so`, and the app
+reached `onResume`, `onWindowFocusChanged`, `boot: main activity started` and
+live tgnet requests — 8,576 lines of run log. So `java.lang.System` and
+`android.os.SystemClock` resolve through JNI on an image without being in
+`out/ni-config`; whatever registers them, it is not the traced config.
+
+The run still exits 1, on one uncaught exception, and it is the warning the
+build already named:
+
+```
+java.lang.NoSuchMethodError: org.telegram.ui.LaunchActivity.onBackPressed()V
+	at com.oracle.svm.core.jni.functions.JNIFunctions.GetMethodID(JNIFunctions.java:431)
+```
+
+`reflect-config` asks for `LaunchActivity.onBackPressed()`, registering it fails
+at build time with `NoClassDefFoundError: android/app/PictureInPictureParams`
+(api-impl has no such class), and atlas then looks the method up by JNI at run
+time and gets nothing. It is not fatal — the app keeps running past it — but it
+is the image run's first fix and it belongs in atlas.
+
+### Still open going into the image run
+
+- **A green build proves the build, nothing else.** With `--shared` there is no
+  main class, so the analysis roots are exactly the 63 `jni-config` + 122
+  `reflect-config` entries. `run.sh --image` is the verdict, and the one run
+  above is a smoke test, not that verdict.
+- `LaunchActivity.onBackPressed()` — the missing `android.app.PictureInPictureParams`
+  in api-impl (atlas fix, FR-1a), then a rebuild.
+- The other ten build warnings: `android.view.View$AttachInfo`,
+  `android.widget.Editor`, `org.kxml2.io.KXmlSerializer`,
+  `kotlin.reflect.jvm.internal.ReflectionFactoryImpl`, `com.whatsapp.util.Log`,
+  the four AOSP-internal fields and `NativePRNG.<init>`. Each is a traced entry
+  the image classpath cannot satisfy; none stopped the build.
+- **`android.content.res.AssetManager` is build-time initialised** by
+  native-image's heuristic. Safe only because its statics are empty today.
+- Native binding is unproven beyond what the one run exercised: 96 exported
+  `Java_org_telegram_*` symbols and 76 `RegisterNatives` entries, none of them
+  listed anywhere at build time.
+- `--strict-image-heap` is recommended by 21.0.2 and would move ~34,000 classes
+  off build-time init. Not adopted here: it is a different build, and this one
+  wanted the first one.
