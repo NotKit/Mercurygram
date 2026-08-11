@@ -209,10 +209,18 @@ if [ "$atlas_git" = 1 ]; then
 	atlas_branch=$(git -C "$ATLAS_DIR" branch --show-current)
 	atlas_rev=$(git -C "$ATLAS_DIR" rev-parse --short HEAD)
 	atlas_dirty=""
-	[ -n "$(git -C "$ATLAS_DIR" status --porcelain)" ] && atlas_dirty=" (working tree dirty)"
+	# The suffix goes into ATLAS_REV itself, not only into the human-readable
+	# lines: build-image.sh stamps that value into out/image/build-stats.env,
+	# and a bare hash there claims a revision that cannot rebuild the artifact.
+	atlas_rev_suffix=""
+	if [ -n "$(git -C "$ATLAS_DIR" status --porcelain)" ]; then
+		atlas_dirty=" (working tree dirty)"
+		atlas_rev_suffix="-dirty"
+	fi
 else
 	atlas_branch="unknown"
 	atlas_rev="unknown"
+	atlas_rev_suffix=""
 	atlas_dirty=" (no git here; see the host build's ARTIFACTS.md for the revision)"
 fi
 jdk_version=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1)
@@ -375,7 +383,7 @@ ATLAS_NATIVES_DIR="$ATLAS_OUT"
 ATLAS_FRAMEWORK_RES="$ATLAS_OUT/framework-res.apk"
 ATLAS_FONTS_XML="$ATLAS_OUT/system/etc/fonts.xml"
 ATLAS_BRANCH="$atlas_branch"
-ATLAS_REV="$atlas_rev"
+ATLAS_REV="$atlas_rev$atlas_rev_suffix"
 ATLAS_API_IMPL_SHA="$jar_sha"
 EOF
 

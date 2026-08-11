@@ -84,7 +84,9 @@ echo "booting Mercurygram for ${seconds}s with the transplanted session"
 	>"$PORT_OUT/check-chatlist.log" 2>&1 &
 run_pid=$!
 
-wait_for_log '^boot: main activity started' 90 || {
+# Unanchored, like run.sh's own check: liblog writes a message and its
+# newline separately, so the launcher's line can land inside one.
+wait_for_log 'boot: main activity started' 90 || {
 	echo "the app never reached the main activity:" >&2
 	tail -40 "$log" >&2
 	exit 1

@@ -2881,3 +2881,542 @@ is the image run's first fix and it belongs in atlas.
 - `--strict-image-heap` is recommended by 21.0.2 and would move ~34,000 classes
   off build-time init. Not adopted here: it is a different build, and this one
   wanted the first one.
+
+## The image boots to the chat list
+
+One atlas fix, one rebuild, one run. `run.sh --image --seconds 30` exits 0 with
+`run ok: booted to the main activity, no uncaught exceptions in 30s`, and
+`out/screenshots/us009-image-chatlist.png` is the chat list with live messages
+timestamped during the run.
+
+### The one framework stub the image run needed, and the error behind it
+
+`android.app.PictureInPictureParams` — atlas `1bb39aeb`, a stub class with the
+nested `Builder` the app calls (`setAspectRatio`, `setExpandedAspectRatio`,
+`setSourceRectHint`, `setActions`, `setAutoEnterEnabled`, `build`) plus a no-op
+`Activity.setPictureInPictureParams`, because `LaunchActivity`'s override calls
+super on it. api-impl had no such class, so the build could not register
+`LaunchActivity.onBackPressed()`:
+
+```
+Warning: Could not register method org.telegram.ui.LaunchActivity.onBackPressed()
+for reflection. Reason: java.lang.NoClassDefFoundError:
+android/app/PictureInPictureParams.
+```
+
+(Reflecting over LaunchActivity's declared methods loads the parameter type of
+its `setPictureInPictureParams`.) atlas then looked the method up by JNI at run
+time and got nothing:
+
+```
+java.lang.NoSuchMethodError: org.telegram.ui.LaunchActivity.onBackPressed()V
+	at com.oracle.svm.core.jni.functions.JNIFunctions.GetMethodID(JNIFunctions.java:431)
+```
+
+That is the whole list — one stub, one error. The Builder stores what the app
+sets and hands it back; nothing reads it and `Activity.setPictureInPictureParams`
+drops it. `Builder.setActions` takes `List<?>` because api-impl has no
+`RemoteAction` and the erased descriptor an app call site uses is the same either
+way. Nothing under `org/telegram/**` was touched.
+
+The build's warning list is 10 lines instead of 11 — the `onBackPressed` one is
+gone and nothing new appeared. The shipped image is built from committed atlas
+`1bb39aeb`: 247,476,056 B, 282 s, peak RSS 9,072 MB, two `DT_NEEDED`
+(`libz.so.1`, `libc.so.6`), no `libjvm.so` in `/proc/<pid>/maps` during the run,
+`ATLAS_REV="1bb39aeb"` in `build-stats.env`.
+
+### Criterion 2 in full: what is left in `out/run.log`, and why
+
+The criterion asks for no `ClassNotFoundException`, `NoSuchMethodError` or
+missing-metadata error. After the fix a 30 s image run has **0
+`NoSuchMethodError`, 0 `NoClassDefFoundError`, 0 `UnsatisfiedLinkError`** — the
+handover exception from the image build is gone — but the log is not literally clean, and the
+two things left are named rather than glossed:
+
+- **15 `ClassNotFoundException`**: 1 `android.view.View$AttachInfo`, 14
+  `android.widget.Editor`. A HotSpot control run has exactly the same two
+  classes at exactly the same counts, so this is pre-existing port behaviour
+  (below).
+- **1 `com.oracle.svm.core.jdk.UnsupportedFeatureError: Trying to verify a
+  provider that was not registered at build time: AndroidKeyStore version 1.0`**,
+  in UnifiedPush's web-push key generation. This one *is* image-only and it *is*
+  a build-time-registration error, i.e. a missing-metadata error in the
+  criterion's sense. It is swallowed by the caller, HotSpot fails the same method
+  five lines later for a different reason, and no working feature is lost — the
+  mechanism is under the parity checks below, and it is recorded, not fixed.
+
+So criterion 2 holds for everything the image itself introduced, with those two
+exceptions written up. It is not ticked as a clean pass.
+
+### The two remaining ClassNotFoundExceptions are the port's, not the image's
+
+`out/run.log` still has `ClassNotFoundException: android.view.View$AttachInfo`
+(once, from `androidx.core.view.WindowInsetsCompat$Impl20.loadReflectionField`)
+and `android.widget.Editor` (14 times, from `EditTextBoldCursor.init`). A HotSpot
+control run the same afternoon has **exactly the same two classes at exactly the
+same counts, 1 and 14**, so this is pre-existing port behaviour and not an image
+regression. Both are app/androidx reflection probes inside a `catch (Throwable)`
+that log and carry on.
+
+Deliberately not "fixed": an empty `AttachInfo` or `Editor` in atlas would let
+the probe get one step further and then fail on the field it really wants
+(`View.mAttachInfo`, `TextView.mEditor`), which changes app behaviour on both
+backends to swap one logged exception for another. The error tags of the two
+runs are otherwise the same set (`E/ContextImpl`, `E/tgnet`,
+`E/ShortcutInfoCompatSaver`, `E/WindowInsetsCompat`, …) with no image-only line.
+
+One image-specific detail, in case someone does stub them later. The image's
+message is not HotSpot's:
+
+```
+java.lang.ClassNotFoundException: android.widget.Editor. This exception was
+synthesized during native image building from a call to
+java.lang.Class.forName(String) with constant arguments.
+```
+
+16 lines per run carry that suffix. The miss is baked into the binary, not
+thrown by a lookup, so an atlas stub added later would fix HotSpot the moment
+atlas is rebuilt and the image only after a `build-image.sh` as well. Same
+counts, same app behaviour today; different mechanism.
+
+## The parity checks on the image, and the one difference they found
+
+Twelve runs on 2026-08-11 against that image (`out/image/libmercurygram.so`,
+247,476,056 B, atlas `mercurygram/openjdk-port` with the `PictureInPictureParams`
+stub, since committed as `1bb39aeb` and rebuilt to the same byte count): the four
+`run.sh`-driven checks on the image, the
+same four on HotSpot as the control, then the four on the image again, because a
+driving check that passes once is not proof. **All twelve exited 0**, unmodified
+apart from `PORT_LAUNCHER=image`.
+
+| check | image #1 | HotSpot control | image #2 |
+|---|---|---|---|
+| `check-mtproto.sh` | 0 — `420 FLOOD_WAIT_79327` | 0 — `400 PHONE_NUMBER_INVALID` | 0 — `420 FLOOD_WAIT_78800` |
+| `check-chatlist.sh` | 0 — 129 dialogs from cache4.db, list scrolled | 0 — 129 dialogs, scrolled | 0 — 129 dialogs, scrolled |
+| `check-messages.sh` | 0 — 15 cached, sent + `updateMessageID` + incoming | 0 — same | 0 — same |
+| `check-emoji.sh` | 0 — 110 glyphs, 18435 colours, `…😚` | 0 — 109 glyphs, same colours | 0 — 108 glyphs, same colours |
+
+Each image run carries its own no-JVM evidence: `run.sh` read
+`/proc/<pid>/maps` during the run and printed `maps: …/libmercurygram.so mapped,
+no libjvm.so` in all eight, and every run ended in `run ok: booted to the main
+activity, no uncaught exceptions`. Boot-to-checks-done wall clock is within 3 s
+of HotSpot's on every check (chat list 26-27 s vs 28 s, messages 32-35 s vs 35 s,
+emoji 37 s vs 40 s) — a like-for-like start-up number comes later, not from this.
+
+The mtproto answer differs between runs, and the numbers say it is the server's
+clock and not the backend: the two image runs got `FLOOD_WAIT_79327` and
+`FLOOD_WAIT_78800`, a 527 s drop over the 517 s between them — one pre-existing
+~22 h flood window counting down, which the HotSpot control in the middle
+answered with `PHONE_NUMBER_INVALID` instead. All three are the error arm, which
+is the only arm this environment can execute: with `APP_ID=0` the server never
+sends a code, as recorded under the MTProto check above.
+
+### The two logged `ClassNotFoundException`s are identical, per check, to HotSpot's
+
+`android.view.View$AttachInfo` (androidx `WindowInsetsCompat`) and
+`android.widget.Editor` (`EditTextBoldCursor.init`) appear in every run on both
+backends, and the counts match **exactly**, per check and across both image
+rounds:
+
+| | mtproto | chatlist | messages | emoji |
+|---|---|---|---|---|
+| `View$AttachInfo` | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 |
+| `widget.Editor` | 31 / 31 / 31 | 14 / 14 / 14 | 18 / 18 / 18 | 21 / 21 / 21 |
+
+(image #1 / HotSpot / image #2.) The count varies by check because it is one per
+`EditText` the run creates, and it is reproducible to the unit — so these are the
+port's pre-existing probes, unchanged by the image. The image run's reasoning for
+leaving them alone still holds.
+
+### The one real image-only difference: JCE provider verification
+
+`org.unifiedpush.android.connector`'s web-push key generation fails on **both**
+backends, once per run, in the same method — but for different reasons, and the
+image's is a Native Image restriction:
+
+```
+image:   com.oracle.svm.core.jdk.UnsupportedFeatureError: Trying to verify a provider
+         that was not registered at build time: AndroidKeyStore version 1.0
+             at javax.crypto.JceSecurity.getVerificationResult(JceSecurity.java:333)
+             at javax.crypto.KeyGenerator.getInstance(KeyGenerator.java:286)
+             at …keys.WebPushKeysEntries23.getSecretKey(WebPushKeysEntries23.kt:115)
+HotSpot: java.lang.ClassCastException: class android.security.keystore.KeyGenParameterSpec
+         cannot be cast to class java.security.spec.AlgorithmParameterSpec
+             at …keys.WebPushKeysEntries23.getSecretKey(WebPushKeysEntries23.kt:120)
+```
+
+Substrate verifies JCE providers at build time, and atlas builds its
+`AndroidKeyStore` provider in Java at run time — an anonymous `new
+Provider("AndroidKeyStore", 1.0, …)` handed to `Security.addProvider` in
+`Context.java:141-145`, which is exactly the "version 1.0" the error names. A
+provider that did not exist during analysis cannot be verified, so
+`KeyGenerator.getInstance` rejects it five lines before the point where HotSpot
+fails on atlas's `KeyGenParameterSpec` not implementing `AlgorithmParameterSpec`. Both
+are swallowed by UnifiedPush and logged; both leave the app with no web-push
+keys, which is the port's existing state (push is out of scope, and there is no
+distributor on the desktop). So the image loses no working feature here, but it
+does move the failure earlier, and **fixing atlas's `KeyGenParameterSpec` would
+not be enough on the image** — a provider assembled at run time can never pass
+build-time verification, so that path would also need the provider to exist
+during analysis (registered from a build-time-initialised class, or declared to
+the builder's security config). Recorded, not fixed: no check asks for it and
+The parity checks forbid a build flag with no observed need behind it.
+
+Counts: 1 per image run in all four checks (both rounds), 1 per HotSpot run in
+all four.
+
+### One non-reproducible log line, and why it is not the image's
+
+`chatlist` image #1 logged twice:
+
+```
+org.telegram.tgnet.TLParseException: can't parse magic cd78e586 in
+org.telegram.tgnet.TLRPC$upload_File. Source: NETWORK
+    at org.telegram.tgnet.TLRPC$TL_upload_getFile.deserializeResponse(TLRPC.java:52903)
+```
+
+Not an image finding, for three reasons. `upload_File.TLdeserialize` is a
+`switch` over magics in generated code, not reflection, so no metadata can be
+missing. The app knows this particular magic: `TLParseException.java:18-19`
+hard-codes `constructorId != 0xcd78e586` twice, so it is logged and deliberately
+not reported as a scheme error. And it did not recur — not in image #2, not in
+any HotSpot run — because which file the session downloads is server-side.
+
+### What cannot run on the image, and the mechanism
+
+The four `--run-class` checks — `check-tlstore.sh`, `check-dump-hprof.sh`,
+`check-extract-apk.sh`, `check-native-loader.sh` — are HotSpot-only **by
+construction**, not by regression. Each names
+`$ATLAS_OUT/android-translation-layer-hotspot` directly (not `$PORT_LAUNCHER_BIN`)
+and hands it `--classpath …:$PORT_OUT/tools`, a helper compiled per run. The
+image has no class path and `out/tools` is not among the 95 `-cp` entries in
+`out/image/build-argv.txt`, so the helper class does not exist inside the image.
+Run anyway, that is exactly what happens:
+
+```
+$ android-translation-layer-image --vm-library …/libmercurygram.so \
+      --classpath "…/shim.jar:…/classpath/*:…/out/tools" --run-class TLClassStoreCheck …
+image: ignoring --classpath; the image has no class path
+run-class: running TLClassStoreCheck.main() instead of creating the application
+error: exception during looking up the --run-class class:
+java.lang.NoClassDefFoundError: TLClassStoreCheck
+exit 1
+```
+
+Making them image-capable would mean compiling each helper *into* the image,
+i.e. a different image per check — which is why the PRD's Technical
+Considerations already list "no `--run-class` on the image" as a debuggability
+cost, not a gap to close. `check-tlstore.sh` was re-run on HotSpot for FR-2 and
+passes: *all 19 classes in the store instantiate*.
+
+`check-env.sh` and `check-graalvm.sh` boot nothing and are launcher-independent.
+
+### Nothing was changed for the parity checks
+
+No atlas commit, no metadata change: the three acceptance checks plus
+`check-emoji.sh` passed against the image as they stand, twice, with
+`PORT_LAUNCHER=image` as the only difference. `out/ni-config` was not touched.
+(The `wait_for_log` anchor in the four checks was relaxed afterwards — see the
+review section below — and every check was re-run on both backends after it.)
+
+### Re-run after the atlas commit, on the rebuilt image
+
+The image the twelve runs used was built from a dirty atlas checkout. After
+committing the stub (`1bb39aeb`) and rebuilding, everything above was re-run
+against the rebuilt `.so` — same size to the byte, same ten build warnings:
+
+| run | result |
+|---|---|
+| `run.sh --image --seconds 30` | 0 — booted, chat list screenshot, `maps: … no libjvm.so` |
+| `PORT_LAUNCHER=image check-chatlist.sh` | 0 — 129 dialogs, list scrolled |
+| `PORT_LAUNCHER=image check-messages.sh` | 0 — 15 cached, sent + `updateMessageID` + incoming |
+| `PORT_LAUNCHER=image check-mtproto.sh` | 0 — `420 FLOOD_WAIT_74918` (second attempt; see the flake below) |
+| `PORT_LAUNCHER=image check-emoji.sh` | 0 — 109 glyphs, 18435 colours, tapped emoji sent |
+| `run.sh --seconds 25` (HotSpot, FR-2) | 0 |
+| `check-chatlist.sh` (HotSpot, FR-2) | 0 — 129 dialogs, scrolled |
+
+`FLOOD_WAIT_74918` continues the same countdown the twelve runs recorded (79327,
+78800, 76311), which is the server's clock and not a backend difference.
+
+## The numbers, and the answer about jlink
+
+Measured on 2026-08-11, x86_64, against the image built from atlas `1bb39aeb`
+(`out/image/libmercurygram.so`, 247,476,056 B). **Success Metric 3 is not met as
+written: the image starts faster and uses less memory, but the install is
+51.7 MB bigger**, and the metric asked for both.
+
+**That was overridden the same day.** The owner's decision is that a 24 % faster
+cold start is the win that matters and the 51.7 MB is an acceptable price, so
+the image is the preferred x86_64 desktop runtime. The measurements below are
+unchanged by that — they are why the decision could be made — and the metric
+stays recorded as not met, because the bytes are the bytes.
+
+The click still ships jlink, but for a different reason than the numbers:
+`native-image` cannot cross-compile and no arm64 image exists (FR-2, FR-6).
+
+### Size: what actually changes, x86_64, apparent bytes of regular files
+
+Only these files differ between the two runtimes. Everything else in a package —
+`app.apk` (64,045,594 B), the native libraries, `framework-res.apk`, fonts — is
+byte-identical either way and is left out of the swap on purpose.
+
+| goes away with jlink | bytes |
+|---|---|
+| `out/classpath/*.jar` (93 jars, 83,995,583 of it `TMessagesProj.jar`) | 116,180,987 |
+| `jvm/` — the click's own jlink of 14 modules, re-run on the x86_64 JDK | 76,593,423 |
+| `out/atlas/api-impl.jar` | 2,935,758 |
+| `out/atlas/android-translation-layer-hotspot` | 136,568 |
+| `out/shim.jar` | 61,374 |
+| **total** | **195,908,110** |
+
+| comes in with the image | bytes |
+|---|---|
+| `out/image/libmercurygram.so` | 247,476,056 |
+| `out/atlas/android-translation-layer-image` | 135,256 |
+| **total** | **247,611,312** |
+
+**Delta: +51,703,202 B (+26.4 % of the part that changes).** The image ships
+none of the jars, api-impl or the shim: `vm_image.c` prints `image: ignoring
+--api-impl-jar` and `image: ignoring --classpath`. The apks still ship — they
+reach Java as `-D` file paths, not as class path entries.
+
+Against a whole install, the arm64 click that ships today measures 324,352,711 B
+of regular files, of which 196,623,677 B is its own jlink column (`jvm/`
+77,315,670 + `classpath/` 116,241,858 + `api-impl.jar` 2,931,781 + the HotSpot
+launcher 134,368) — within 0.4 % of the x86_64 column above, which is the only
+cross-architecture claim made here. So an image build of the same tree would be
+about **376 MB installed against 324 MB**, +15.9 %.
+
+The jlink runtime itself was **not** taken from the PRD's 74 MB arm64 figure. The
+click's own jlink invocation (same 14 `PORT_JVM_MODULES`, `--no-header-files
+--no-man-pages --compress=zip-6`) was re-run on the x86_64 JDK 21.0.11:
+76,593,423 B, against the arm64 `jvm/` at 77,315,670 B — same 19 modules in
+`release`, 77 files each, within 1 %. The architectures are not the problem.
+
+Two things the table hides, both measured:
+
+- **Compressed, the image wins.** `gzip -6`: the `.so` is 80,735,126 B, while
+  `jvm/` + the 93 jars + shim + api-impl + launcher come to 103,436,782 B —
+  the image is ~22.6 MB smaller to download, because the jars are already
+  deflated and re-compress by about a tenth while the `.so` compresses 3.1x.
+  A click is shipped compressed, but the criterion says on-disk, and on disk
+  the image is bigger.
+- **Stripping buys nothing.** The `.so` is "with debug_info, not stripped", and
+  `strip --strip-unneeded` takes it from 247,476,056 to 247,302,632 B: 173 KB,
+  0.07 %. native-image's own breakdown is 120.41 MB code, 88.50 MB image heap,
+  27.11 MB other — there is no debug bulk to remove.
+
+### Start-up: cold, same definition on both, `measure-startup.sh`
+
+`linux-port/measure-startup.sh` is the harness, committed with these numbers so the
+number can be re-checked rather than believed. Per run it drops the page cache
+(`sync; echo 3 > /proc/sys/vm/drop_caches`), waits 2 s, execs the launcher with
+the argv `run.sh` builds, timestamps every launcher/liblog line, and samples the
+X root window with `xwd` every ~100 ms. Runs alternate hotspot/image so drift
+hits both columns. Two pixel events are kept apart, because conflating them
+would flatter the image by ~3 s:
+
+- `window_mapped` — the screen stops being black. That is GLFW's empty white
+  window; the `.xwd` is written out and it is a blank rectangle.
+- `first_frame` — the next sample whose pixels differ from that blank window.
+  The `.xwd` is Telegram's chat-list skeleton with the "Connecting" title. This
+  is the headline number. Resolution ±0.12 s.
+
+Cold, n = 6 per backend (four runs on the pre-commit image, two on the rebuilt
+one; they agree), seconds from exec:
+
+| marker | HotSpot | image | delta |
+|---|---|---|---|
+| VM created | 0.82 [0.74..0.93] | 0.84 [0.77..0.98] | +0.02 |
+| application created | 6.78 [6.68..6.84] | 6.21 [6.12..6.35] | −0.57 |
+| window mapped | 6.82 [6.73..6.92] | 6.28 [6.18..6.41] | −0.54 |
+| `Application.onCreate` returned | 7.70 [7.58..7.78] | 6.52 [6.40..6.63] | −1.18 |
+| dialogs out of cache4.db | 8.95 [8.80..9.14] | 7.10 [6.95..7.25] | −1.85 |
+| main activity started | 9.42 [9.30..9.59] | 7.11 [6.96..7.26] | −2.30 |
+| **first frame** | **9.58 [9.45..9.81]** | **7.27 [7.08..7.39]** | **−2.31 (−24.1 %)** |
+
+Warm (same harness, `--warm`, n = 2 each): first frame 8.26 vs 6.12 s, −25.9 %.
+The win is the same hot or cold, so it is not I/O.
+
+Creating the VM is a wash: 0.82 vs 0.84 s cold. Substrate's isolate is not
+measurably cheaper than `JNI_CreateJavaVM` here, and the whole win is in what
+runs after — class loading and first execution of app code.
+
+Where the rest of the time goes, since it bounds how much any runtime change can
+buy: **5.96 s (HotSpot) / 5.37 s (image) pass between "VM created" and
+"application created" with no log line on either backend.** That is atlas's
+native `Context.createApplication` parsing `app.apk` and `framework-res.apk`
+through libandroidfw. It is 74 % of the image's 7.27 s. It is *not* a fixed
+floor, though — the image is 0.59 s faster through it too, so about a quarter of
+the total win happens inside that silent stretch and the rest after it.
+
+### RSS at the chat list
+
+Read from `/proc/<pid>/status` and `/proc/<pid>/smaps` at a fixed 75 s after
+exec, with the pixel sampler stopped so nothing is poking the app. Proof it is
+really at the chat list and not at a skeleton: an `.xwd` is captured at that
+instant on both backends, and both show the populated 129-dialog list with
+avatars and live timestamps.
+
+| | HotSpot | image | delta |
+|---|---|---|---|
+| RSS | 589,007 KB [566,552..618,560] | 503,205 KB [492,316..520,580] | −85,801 KB (−14.6 %) |
+| PSS | 546,572 KB [523,651..576,554] | 460,604 KB [449,061..478,258] | −85,968 KB (−15.7 %) |
+
+The ranges do not overlap, but the spread is wide (±5 %) and RSS climbs the
+whole run on both — HotSpot 519 → 570 MB, image 465 → 505 MB over the same
+minute — so the number only means anything with the 75 s attached. Two sessions'
+worth of runs put the gap between 57 MB and 100 MB; −86 MB is the pooled mean.
+The image wins despite mapping a 247 MB `.so`: only touched pages are resident,
+and there is no metaspace, no code cache and no JIT'd code.
+
+### Verdict: the image does not replace jlink
+
+Scored against the PRD's own rule — "a native image has to beat it on size *and*
+start faster":
+
+- **installed size: loses.** +51.7 MB, +15.9 % on a whole install. Not marginal,
+  not a rounding artefact.
+- **cold start: wins.** −2.31 s to first frame, −24.1 %, six runs each.
+- **RSS at the chat list: wins.** −86 MB, −14.6 %. Not asked for; recorded.
+- **download size: wins.** −22.6 MB compressed. Also not the criterion.
+
+So: **no**, under the rule as written, and the rule should stay `AND`. The
+narrower and more useful reading is that the image is a better *runtime* and a
+worse *install*. `linux-port/click/` is unchanged and keeps shipping jlink
+(FR-2); the image stays an opt-in second backend on x86_64, which
+`PORT_LAUNCHER=image` already gives at no cost to the HotSpot path.
+
+**The obvious lever does not exist on this toolchain, and that was checked, not
+assumed.** A first draft of this write-up recommended rebuilding with `-Os` and
+`--gc=serial` as "the cheapest experiment on the board". Both are wrong here:
+
+```
+$ native-image -Os -cp . H
+Error: Invalid value 's' provided for option Optimize (expected 'b' or numeric value >= 0)
+$ native-image --gc=G1 -cp . H
+Error: In user 'G1' is not a valid value for the option --gc. Supported values are 'epsilon', 'serial'.
+```
+
+GraalVM CE 21.0.2 has no `-Os` (`-H:Optimize` takes `b`, 0..3), and serial GC is
+already what this image uses — `out/image/build.log:21` says `Garbage collector:
+Serial GC`, the version banner says `serial gc`, and the only alternative,
+`epsilon`, never collects. So reopening Success Metric 3 that way means
+upgrading the pinned GraalVM at `env.sh:29` first, not a 4.5-minute rebuild.
+Nobody has measured what a newer native-image would save.
+
+### arm64, if the verdict ever changes
+
+It has not, so this is a contingency answer. `native-image` cannot
+cross-compile — 21.0.2 offers no target option and GraalVM does not support it —
+so an arm64 image needs an aarch64 native-image on an aarch64 host.
+
+The good news, and the part most likely to be got wrong: **the arm64 build host
+does not need the port's native build.** Every input to `build-image.sh` is
+architecture-neutral — `api-impl.jar` and `shim.jar` (javac output, not dex), the
+93 jars in `out/classpath`, and the JSON in `out/ni-config`. atlas, skia,
+`libtmessages.so` and the launcher are not image inputs and stay in the existing
+x86_64 clickable cross container. So it is "add one aarch64 step that eats
+~120 MB of jars and emits a ~250 MB `.so`", not "port the build to arm64".
+
+What such a host needs, from this build's own numbers (`build-stats.env`,
+`build.log`): **9,072 MB peak RSS** for the whole process tree, against
+`-J-Xmx12g --parallelism=8`, with native-image's own builder figure `Peak RSS:
+8.95GB`; **282 s** wall on 12 x86_64 cores (`Finished generating … in 4m 39s`),
+of which analysis is 111.7 s at 5.17 GB; about a GB of scratch plus the output;
+GraalVM CE 21 for linux-aarch64 and a JDK 21 to stage the jars. So: 16 GB of
+RAM, not 12.
+
+Three options, and only the first is sane. Times are **estimates**, scaled from
+the measurement above; none was run.
+
+1. An aarch64 Linux server (8 vCPU, 16 GB): estimated 6-12 minutes a build. It
+   is new infrastructure — `click/build.sh` is one command in one container
+   today, and this splits it across two hosts with an artefact hand-off.
+2. qemu-user on this x86_64 box: estimated 25-90 minutes, and the emulated
+   builder still wants ~9 GB of guest RAM. This is what the PRD's Non-Goals call
+   the opposite of what the click packaging exists to avoid.
+3. On the phone: not viable. Peak RSS is 9.1 GB.
+
+Two arm64 risks that are not about the build host:
+
+- The metadata was traced on x86_64 with `ATL_NO_GPU=1`, because skia's Ganesh
+  path crashes on this desktop's GL driver. The device runs the GPU path
+  (`GPU rendering (Ganesh) on Adreno (TM) 740`). Classes reachable only there are
+  not in `out/ni-config`, and under a closed world that is a
+  `NoClassDefFoundError` on the device rather than a slow path. FR-4 says the fix
+  is a check that exercises it, and no such check exists.
+- The size verdict does not improve on arm64, and may get slightly worse: the
+  shared column is fixed and the arm64 `jvm/` is within 1 % of the x86_64 one.
+
+## Final review: every finding and what happened to it
+
+Two reviews ran over phase 3 — one re-running the boot and parity claims, one
+re-deriving the numbers. Fifteen findings; what follows is all of them, because a
+dropped `LOW` is how a wrong number survives.
+
+Fixed:
+
+- **`-Os` / `--gc=serial` do not exist as a lever** (HIGH). The verdict's one
+  actionable recommendation was unrunnable on the pinned toolchain. Re-checked
+  by running both, quoted above; the recommendation is now "upgrade GraalVM
+  first, and measure".
+- **atlas was dirty** (MEDIUM, FR-1a in form). The `PictureInPictureParams` stub
+  existed only as working-tree state. Committed as `1bb39aeb`.
+- **`build-stats.env` claimed a revision that cannot build the artefact**
+  (MEDIUM). It stamped `ATLAS_REV="e0ee8e39"` for a `.so` that demonstrably
+  contains `android.app.PictureInPictureParams$Builder`. Two fixes: the stub is
+  committed and the image rebuilt (`ATLAS_REV="1bb39aeb"`, same 247,476,056 B,
+  same ten build warnings), and `build-atlas.sh` now appends `-dirty` to
+  `ATLAS_REV` itself when the checkout is dirty, so the next such build says so
+  in the file rather than only in a comment.
+- **The numbers were recorded nowhere** (MEDIUM). It is the section above, plus both
+  READMEs and the PRD.
+- **The image-run write-up discussed only the two `ClassNotFoundException`s**
+  (MEDIUM) and called the run otherwise clean, leaving out the image-only
+  `UnsupportedFeatureError` that also violates criterion 2. The criterion is now
+  stated in full, with both exceptions.
+- **The image's `ClassNotFoundException`s are synthesized at build time** (LOW).
+  Recorded under the image run: same counts as HotSpot, different mechanism, and a
+  later atlas stub would need a rebuild to reach the image.
+- **The "within 73 KB" sanity check was two ~1 MB errors cancelling** (LOW). The
+  reconstruction substituted x86_64 files for arm64 ones (+1,071,437 B) and
+  omitted ~996,869 B of libraries `click/build.sh` bundles. Withdrawn: the size
+  section above compares the two runtimes inside one architecture and decomposes
+  the real arm64 tree separately, instead of reconstructing it.
+- **The measurement harness documented a different marker than it used** (LOW).
+  The scratch script's docstring called `window_mapped` the first frame, which is
+  2.8-3.4 s earlier than the number that was reported. Superseded by committed
+  `measure-startup.sh` / `measure-startup.py`, whose docstring describes the
+  two-event split it implements.
+- **The arm64 section quoted numbers from the wrong build** (LOW): analysis
+  "106.7 s @ 3.49 GB" was the first full image build, whose log had since been overwritten,
+  and "peak RSS 8.62-8.87 GB" mixed native-image's builder GiB figure with the
+  process-tree decimal GB. The section above quotes this build's `build.log` and
+  `build-stats.env` only, and names which is which.
+- **The 5.3 s silent stretch was called untouchable** (LOW) while the same
+  table showed the image 0.60 s faster through it. Corrected: 5.96 s vs 5.37 s,
+  and about a quarter of the win happens inside it.
+
+Found while re-running, not by the reviews:
+
+- **`check-*.sh` could fail a good boot.** `check-mtproto.sh` failed once with
+  "the app never reached the main activity" on a run that had reached it: liblog
+  writes a message and its newline in separate calls, and the launcher's line
+  landed inside one —
+  `D/tmessages(602676): cache path = /tmp/atl_cache/…betaboot: main activity started`
+  — so `wait_for_log '^boot: main activity started'` never matched. The four
+  driving checks now grep unanchored, like `run.sh`'s own check has always done.
+  The launcher is the only writer of that string. Re-run after the change:
+  `check-chatlist.sh` passes on both backends, and `check-mtproto.sh` passes on
+  the image.
+
+Left open, deliberately:
+
+- The two `ClassNotFoundException`s (`View$AttachInfo`, `widget.Editor`) stay
+  unstubbed: identical on HotSpot, and a stub moves the failure one field later.
+- The `AndroidKeyStore` JCE provider cannot be verified in an image. Fixing it
+  needs a build-config change with no failing check behind it.
+- `android.content.res.AssetManager` is still build-time initialised by
+  native-image's heuristic; safe only because its statics are empty today, and
+  the build gate prints its kind every build for that reason.

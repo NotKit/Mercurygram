@@ -68,6 +68,7 @@ atlas android-translation-layer-hotspot
 | `build-classpath.sh` | builds the HotSpot classpath and the APK from the Android sources |
 | `launcher/` | why the launcher lives in atlas, the smoke tests that boot it on either VM backend, and `display.sh` (the Xvfb/screenshot helper the run scripts share) |
 | `build-image.sh` | no flag: the real native image over api-impl + shim + the classpath jars, ~4.5 min and ~9 GB (`out/image/build-stats.env`). `--stub`: the one-class image `launcher/image-smoke-test.sh` checks the image launcher against |
+| `measure-startup.sh` | cold start to first frame and RSS at the chat list, HotSpot vs image, one definition (`measure-startup.py` is the harness it drives) |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
 | `check-extract-apk.sh` | proves `AssetManager.extractFromAPK` reads the apk, not the class path, and that a miss is cheap and throws nothing |
@@ -720,6 +721,48 @@ Things to know:
 - `-X` is also how to pass anything else HotSpot-specific (`-Xmx`,
   `-XX:+UseSerialGC`); `JDWP_LISTEN=<port>` and `ATL_CHECK_JNI=1` are launcher
   environment variables for the debugger and for `-Xcheck:jni`.
+
+## The native image: what it costs and what it buys
+
+`build-image.sh` produces `out/image/libmercurygram.so` (247,476,056 B, ~4.7 min,
+9.1 GB peak RSS), and `run.sh --image` — or `PORT_LAUNCHER=image` for any
+`check-*.sh` — boots the app on it with no `libjvm.so` in the process. All three
+acceptance checks pass on it.
+
+**It is the preferred x86_64 desktop runtime**: faster to start, lighter in
+memory, and bigger on disk. Measured on x86_64 on 2026-08-11 (the full
+itemisation is in `BRINGUP_NOTES.md`):
+
+| | jlink (shipping) | native image | delta |
+| --- | --- | --- | --- |
+| what changes on disk: jars + `jvm/` + api-impl + shim + launcher, vs the `.so` + launcher | 195,908,110 B | 247,611,312 B | **+51.7 MB (+26.4 %)** |
+| whole install, same tree | ~324 MB | ~376 MB | **+15.9 %** |
+| compressed (what a click downloads) | 103,436,782 B | 80,787,379 B | −22.6 MB |
+| cold start to first frame, n=6 | 9.58 s | 7.27 s | **−24.1 %** |
+| RSS at the chat list, t=75 s, n=6 | 589 MB | 503 MB | −14.6 % |
+
+So the image is a better runtime and a worse install. The original rule was smaller
+*and* faster; the 2026-08-11 decision was that the 24 % start-up win is worth
+51.7 MB of disk, so the image is what a desktop run should use. HotSpot stays
+the development runtime — it is the only one with `--run-class`, JDWP and
+`hs_err` files, and the only one that can be traced (FR-2).
+
+`click/` is unaffected, and not because of these numbers: `native-image` cannot
+cross-compile, so there is no arm64 image to ship (FR-6). Re-measure with
+`measure-startup.sh` (cold runs need passwordless `sudo` to drop the page cache):
+
+```sh
+linux-port/measure-startup.sh --rounds 4 --seconds 75
+linux-port/measure-startup.py --summary linux-port/out/measure/startup-results.json
+```
+
+Two things worth knowing before reopening the size question. GraalVM CE 21.0.2
+has no `-Os` and its serial GC is already what this builds with, so the usual
+size lever needs a newer GraalVM, not a rebuild. And an arm64 image cannot be
+cross-compiled: it would need an aarch64 host with 16 GB of RAM (peak RSS here is
+9.1 GB) taking the architecture-neutral jars and `out/ni-config` as its only
+inputs — an estimated 6-12 minutes a build, plus a device-side trace, because
+this config was traced with `ATL_NO_GPU=1` and the phone runs Ganesh.
 
 ## The atlas commit this port needs
 

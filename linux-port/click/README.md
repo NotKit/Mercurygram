@@ -95,6 +95,31 @@ rest (locales, charsets, EC for TLS, the JDWP agent) is what static analysis
 cannot see. A missing module is not a build error — it is a `NoClassDefFoundError`
 on whatever path first needs it, so keep the set generous.
 
+### Why it is still jlink and not a GraalVM native image
+
+Not because the image lost. On x86_64 it is the runtime the port now prefers:
+cold start to first frame 24 % faster (7.27 s vs 9.58 s), RSS at the chat list
+15 % lower (503 vs 589 MB), and 22.6 MB smaller compressed — at the cost of
+**+51.7 MB installed**, because dropping `jvm/`, `classpath/`'s 93 jars,
+`api-impl.jar` and `shim.jar` (195,908,110 B) to add a 247,476,056 B
+`libmercurygram.so` takes an install from ~324 MB to ~376 MB. The 2026-08-11
+decision was that the start-up win is worth that. Itemised tables are in
+`../BRINGUP_NOTES.md` under the start-up and size numbers.
+
+**The click keeps jlink because there is no arm64 image to ship**, which is a
+build-host problem and not a verdict on the numbers. Nothing in `click/` changed:
+`run.sh` here still launches `android-translation-layer-hotspot` against `jvm/`.
+Note the +51.7 MB would also weigh more on a phone than on a desktop, so the
+trade-off is worth re-deciding rather than inheriting if an arm64 image appears.
+
+`native-image` cannot cross-compile, so the click would need a second, aarch64
+build host with
+16 GB of RAM (peak RSS is 9.1 GB on x86_64) and 6-12 minutes a build — feeding it
+only the architecture-neutral jars and `out/ni-config`, since none of the native
+build is an image input. The x86_64 metadata would not do: it was traced with
+`ATL_NO_GPU=1` and the device runs Ganesh, and under a closed world a class that
+only the GPU path reaches is a `NoClassDefFoundError` on the phone.
+
 Dropped along the way, none of it reachable at runtime: 30 MB of CDS archives
 (`classes*.jsa`, rebuilt per-JDK anyway), 11 MB of `ct.sym` (javac's historical
 API data), and `include/`. jlink also writes a real `cacerts` (109 upstream CAs)
