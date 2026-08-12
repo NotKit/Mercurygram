@@ -3420,3 +3420,71 @@ Left open, deliberately:
 - `android.content.res.AssetManager` is still build-time initialised by
   native-image's heuristic; safe only because its statics are empty today, and
   the build gate prints its kind every build for that reason.
+
+## The soft keyboard: what Maliit's own Qt plugin does that this did not
+
+Maliit's `input-context/minputcontext.cpp` (maliit/framework) is the reference
+implementation of this protocol, and reading it explained every symptom the
+keyboard had on the device. The findings, which are not specific to this port —
+they apply to anything driving maliit through `libmaliit-glib` — are written up
+in `~/UT/MALIIT-GLIB-NOTES.md`. The four that mattered here:
+
+- **The server keeps a copy of the editor and predicts how it evolves.**
+  `MInputContextConnection::sendCommitString` inserts what it commits into its
+  own `surroundingText`, `sendKeyEvent` deletes from it on Backspace, and the
+  keyboard's word engine reads that copy back. This port never sent
+  `surroundingText` or `cursorPosition` at all, and never sent anything after
+  the first `show`. So the server's copy was whatever it had guessed since the
+  app started: clearing the field (or sending a message) left the keyboard
+  completing a word that no longer existed, and it committed it back. Every
+  edit, every caret move and every programmatic `setText` now pushes
+  `updateWidgetInformation`.
+- **A preedit is not part of the widget's text.** Qt keeps it outside the
+  content and the server assumes the same. atlas's `EditText` splices the
+  composing region into its buffer, so `getImeSurroundingText()` has to subtract
+  it and report the cursor at its start — otherwise the keyboard sees its own
+  uncommitted word as context and types it twice.
+- **`reset()` is racy and MInputContext tracks it.** When a preedit is dropped,
+  the keyboard may already have a commit for it in flight;
+  `DBusServerConnection` keeps the pending reset call and both `commitString`
+  and `updatePreedit` start with `if (imServer->pendingResets()) return;`. That
+  guard is the difference between "the word is gone" and "the word comes back
+  half a second later". The `_sync` calls this used before gave no such
+  ordering — the stale commit is dispatched by GLib once the sync call returns,
+  with no flag left to recognise it by. Every server call is async now.
+- **`handle-*` on a gdbus-codegen skeleton must complete the invocation.** The
+  signals use `g_signal_accumulator_true_handled`, so returning `TRUE` stops
+  emission — the server then waits 25 s for a reply that never comes, and, for
+  `update-input-method-area`, `libmaliit-glib`'s own `_after` completer never
+  runs either. This handled 5 of the 15 context methods and completed none of
+  them. All 15 are handled and completed first thing now, including the two
+  the server calls synchronously (`selection`, `preeditRectangle`).
+
+Also from the same file: releasing the context on window-focus-loss and on
+`atl_window_hide` (an unmapped wayland surface gets no keyboard-leave), the
+100 ms deferred hide so focus moving between two fields does not flap the panel,
+the deferred *show* for a `showSoftInput` that arrives before focus, dropping
+the editor's focus on `imInitiatedHide`, and the replacement ranges on
+`commitString`/`updatePreedit` that autocorrect needs.
+
+- **A keyboard-less desktop can still check all of this.** The debug backend
+  (`ATL_IM_MODULE=debug ATL_IM_DEBUG_INSET=1`) traces the state the app pushes
+  under `ATL_DEBUG_IME=1`, which is exactly what a real backend forwards over
+  D-Bus. `check-input-method.sh` drives Saved Messages with xdotool and asserts
+  on that trace: focus activates the context, each keystroke pushes the text
+  with the cursor at its end, the send resets and pushes an empty
+  `surroundingText`, leaving releases the context. The failure mode here is
+  always "the state stopped being sent", which is invisible in a screenshot and
+  obvious as one line per keystroke.
+
+Left open, deliberately:
+
+- **No reconnect if `maliit-server` restarts.** The Qt plugin retries the
+  address lookup every 6 s and re-registers on reconnect; `libmaliit-glib`
+  caches the bus and both proxies in file statics, so doing the same means
+  `maliit_set_bus(NULL)` and rebuilding every signal connection. There is no way
+  to test it from here (no maliit server on the desktop) and it was equally
+  absent before, so it is documented rather than guessed at. The graceful half —
+  `activationLostEvent` — is handled.
+- `setRedirectKeys` is recorded and not acted on: ATL loads no hardware-keyboard
+  plugin, so nothing would consume the redirected events.
