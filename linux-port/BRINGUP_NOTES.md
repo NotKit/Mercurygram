@@ -3488,3 +3488,212 @@ Left open, deliberately:
   `activationLostEvent` — is handled.
 - `setRedirectKeys` is recorded and not acted on: ATL loads no hardware-keyboard
   plugin, so nothing would consume the redirected events.
+
+## Two menus that never opened: the long press and the window blur
+
+Both were framework gaps, and neither showed up as a crash: one silently did
+nothing, the other left the app looking frozen with a `FATAL`-free log.
+
+- **`setOnLongClickListener` was dead framework-wide.** A long tap on the
+  profile tab of the main tabs is what opens the account switcher
+  (`MainTabsActivity.openAccountSelector`); on the port it just selected the
+  Profile tab. atlas's `View.onTouchEvent` took the press on `ACTION_DOWN` and
+  fired `performClick` on `ACTION_UP`, and nothing anywhere called
+  `performLongClick` — there was no long-press timer at all. App code that runs
+  its own (`RecyclerListView`'s `CheckForLongPress`, `ClickHelper` in
+  `MainTabsLayout`) worked throughout, which is why selecting a message and the
+  tab-slide gesture always did and why this looked like an app bug. Fixed in
+  atlas: `ACTION_DOWN` posts the long press at
+  `ViewConfiguration.getLongPressTimeout()`, a `ACTION_MOVE` outside the view
+  (plus touch slop) cancels it together with the pressed state, `ACTION_UP` and
+  `ACTION_CANCEL` drop it, and a long click the listener handled suppresses the
+  click on release — AOSP's order, including that an unhandled long click still
+  clicks. `View.cancelLongPress()`, an empty stub until now, is what drops the
+  pending one.
+- **The whole-window blur crashed on `WindowManagerGlobal`.** Tapping the
+  forward (or reply) panel above the input opened the blurred layer over the
+  chat and stopped there: no preview, no menu, and the layer swallowed every
+  touch and the back key, which is what "the app froze" was. The phone-number
+  menu (`ScrimOptions`) and every `ItemOptions.setBlur(true)` — the account
+  switcher included — failed the same way. `AndroidUtilities.allGlobalViews()`
+  enumerates the process's windows to draw them into the blur bitmap, and below
+  API 29 it does that by reflection on
+  `android.view.WindowManagerGlobal.getViewRootNames()`/`getRootView(String)`.
+  atlas's class had neither, the `NoSuchMethodException` was caught and became a
+  `null` list, and the bitmap callback then ran with a null bitmap:
+
+```
+E/tmessages: allGlobalViews()
+E/tmessages: java.lang.NoSuchMethodException: android.view.WindowManagerGlobal.getViewRootNames()
+java.lang.NullPointerException: Cannot invoke "android.graphics.Bitmap.getWidth()" because "bitmap" is null
+	at org.telegram.messenger.AndroidUtilities.applyColorMatrix(AndroidUtilities.java:6926)
+	at org.telegram.ui.Components.ScrimOptions.makeGlobalBlurBitmaps(ScrimOptions.java:352)
+	at org.telegram.ui.ChatActivity.checkShowBlur(ChatActivity.java:11719)
+	at org.telegram.ui.ChatActivity.openForwardingPreview(ChatActivity.java:11028)
+```
+
+  Fixed in atlas by implementing both methods, and
+  `android.view.WindowInspector.getGlobalWindowViews()` for the API 29 path,
+  over the active view root's main view followed by its panels: AOSP has one
+  `ViewRootImpl` per window and lists those, while atlas composites dialogs and
+  popups as panels of the single native window, so the panels take the place of
+  AOSP's extra roots. The list is bottom-most first, because the app draws it in
+  order. The names are the view's class and identity hash rather than AOSP's
+  title-plus-`ViewRootImpl`, which a panel here does not have; nothing but
+  `getRootView` consumes them.
+- **A UI-thread exception does not fail the run, and writes no `FATAL`.** Both
+  crashes above were logged and swallowed: `ViewRootImpl.dispatchTouchEvent`
+  catches `Throwable` around the app's handler so a throw does not escape into
+  the native boundary, and an exception from a `Handler` callback is printed and
+  cleared by `ExceptionDescribe`/`ExceptionClear` in the GLib dispatch in
+  `android_os_MessageQueue.c`. So `FileLog.fatal` never runs, `files/logs/*.txt`
+  has nothing, `run.sh` says "no uncaught exceptions" — and the half-built menu
+  stays on screen eating input. For this kind of freeze the evidence is a raw
+  Java stack trace in `out/run.log`, nothing else.
+
+## Three things the same session turned up
+
+- **A notification with an emoji in it lost its text.** `check-input-method.sh`
+  ends on two `g_variant_new_string(): requires valid UTF-8` criticals, from the
+  notification the account's own message comes back as, not from the input
+  method the check is about. `GNotification` keeps what it is handed in a
+  GVariant, and `GetStringUTFChars` returns modified UTF-8, whose surrogate pair
+  for a non-BMP character GLib rejects — the same hazard `jstring_to_utf8`
+  exists for, one file over. Fixed in atlas for the notification's title, body
+  and button label, an intent's string extras and its action/component/data, and
+  the share dialog's mail body: everything there is text the user typed or a
+  chat is named after. Anything else still on `GetStringUTFChars` is fine only
+  as long as it stays away from GLib.
+- **A `Dialog`'s theme is dropped, so a full-screen one paints over the app.**
+  atlas's `Dialog(Context, themeResId)` ignores `themeResId`, so
+  `Window.setContentView`'s `windowBackground` lookup resolves against the
+  *activity's* theme. `ScrimOptions` asks for `R.style.TransparentDialog`
+  (`windowBackground` = transparent) and gets the activity's opaque white
+  instead, which is why the phone-number menu shows a flat white page where the
+  blurred chat should be: the blur bitmap is captured after the window is added,
+  so the window's own background is what gets blurred. Not fixed — wrapping the
+  context in a `ContextThemeWrapper` like AOSP does changes what every dialog in
+  every app resolves, and that wants its own pass over the app's dialogs.
+- **The back key never reaches the activity.** `ViewRootImpl.dispatchKeyEvent`
+  gives `KEYCODE_BACK` to the topmost panel (`onPanelBack`, which is how a
+  dialog or popup closes) and otherwise hands it to the main view; nothing
+  routes an unconsumed one to `Window.Callback`, and `Activity.dispatchKeyEvent`
+  is a `return false` stub, so `onBackPressed` only ever runs when the app calls
+  it itself. Escape in a chat does nothing, and the forwarding preview — a child
+  view of the chat, not a panel — can only be left through its own menu. Not
+  fixed: back would start closing fragments and finishing activities across the
+  whole app, up to quitting it from the chat list, and that needs deciding and
+  retesting on its own.
+
+## The caret was the framework's, not the app's
+
+Typing anywhere — the composer, the chat-list search field — put a grey hairline
+where Android draws a 2 px Telegram-blue bar. Fixed in atlas (`api-impl: let an
+app draw its own text caret`); `check-caret.sh` drives the search field and
+measures what is drawn.
+
+- **The app's own cursor was never drawn, and `SDK_INT=28` is why.**
+  `EditTextBoldCursor` has two ways to know when to draw it, and the port had
+  neither. Above API 29 it installs its own `cursorDrawable` through
+  `setTextCursorDrawable` and draws when that drawable's `draw()` was called;
+  below, it reads `android.widget.Editor.mShowCursor` by reflection. The launcher
+  reports 28 (`vm_common.c`, `-DBuild.VERSION.SDK_INT`), so `init()` takes the
+  reflection path, `Class.forName("android.widget.Editor")` throws — those are
+  the 14–31 `ClassNotFoundException: android.widget.Editor` per run — and
+  `editor` stays null. `onDraw` then falls back to `showCursor = cursorDrawn`,
+  and `cursorDrawn` is only ever set by the marker `ShapeDrawable` that
+  `getTextCursorDrawable()` returns, which nothing on atlas called. So the flag
+  was false in every frame, and `setCursorColor`, `setCursorWidth` and
+  `setCursorSize` reached nothing.
+- **What was on screen was atlas's own caret.** `android.widget.EditText.onDraw`
+  ended in `canvas.drawLine(...)` with `cursorPaint` fixed at `0xFF000000` and
+  the default stroke width 0, so it was a hairline that landed on a half-pixel
+  and antialiased into two half-covered columns.
+- **The API-29 contract works at 28 too, which is what makes this fixable in
+  atlas alone.** `TextView` now holds a `setTextCursorDrawable` /
+  `getTextCursorDrawable` pair and `EditText.onDraw` draws that drawable at the
+  caret rect, keeping `drawLine` for a field that has none.
+  `EditTextBoldCursor` overrides the getter *unconditionally* and, on the `< 29`
+  path, returns a fresh transparent `ShapeDrawable` whose `draw()` sets
+  `cursorDrawn` — AOSP's own mechanism. The getter must therefore be called every
+  frame: caching what a setter stored, as AOSP's `Editor` does, gets nothing
+  here, because at SDK 28 the app never calls the setter.
+- **Placing it needed the vertical padding to stop being zero.** The app puts its
+  cursor at `getExtendedPaddingTop() + (getTotalPaddingTop() -
+  getExtendedPaddingTop())`, both of which atlas returned 0 from, so the caret
+  would have sat at the top of the field instead of beside the text. They are
+  now the compound padding and the compound padding plus what gravity adds
+  (`getLayoutOffsetY()`). `TextView.onDraw` had to start from the *extended*
+  padding for that to work: `EditTextBoldCursor.onDraw` pre-translates by it and
+  sets `ignoreTopCount = 1` so the framework's next read returns 0 and it is not
+  applied twice — a trick that only pays off if the framework reads it at all.
+  `getExtendedPaddingBottom()` was missing outright, and the app's override calls
+  `super`.
+- **The caret is steady, not blinking**, because atlas has no blink timer.
+- **`TextView.setHint` is a no-op and `getHint()` returns the string `"HINT"`.**
+  `EditText` overrides both and keeps the real hint, but nothing draws it, which
+  is why no search field or dialog input on the port shows its placeholder. Any
+  app reading `TextView.getHint()` gets `"HINT"`. Still unfixed.
+
+## A hairline seam across the search pill, and across every alert card
+
+The reported "thin line in the middle of the search bar" is atlas's nine-patch
+drawing ignoring the paint's alpha. Fixed in atlas (`api-impl: fade a
+nine-patch's colour cells with its paint`), with `check-ninepatch.sh` as the
+regression test.
+
+- **It is not device-only, and not the GPU.** The first diagnosis blamed
+  Ganesh's generic path fill, because the seam only ever showed up on the phone.
+  It is neither: on the device it is pixel-identical with `MERCURYGRAM_NO_GPU=1`
+  (CPU raster), and it reproduces on the desktop port at `GRID_UNIT_PX=21`. The
+  variable was the **density**, 2.625, which is the phone's and which no desktop
+  run had used. Reproducing it there turned a 20-minute build-install-shoot loop
+  into an 18-second one.
+- **`Path.addRoundRect` was innocent.** `Theme.createRoundRectDrawable` really is
+  a `ShapeDrawable(RoundRectShape)` ending in `Canvas.drawPath`, but that fill is
+  watertight at every size the pill takes; a `--run-class` harness drawing it
+  into a bitmap never leaked a row. What settled it was painting an **opaque red
+  rect over the whole path bounds** immediately before the fill: the seam rows
+  stayed the page's colour, so something was painting *over* the pill, not
+  failing to paint it.
+- **The over-drawer is a nine-patch at alpha 0.** `FragmentSearchField`'s
+  `dispatchDraw` draws `bg` and then a `BlurredBackgroundDrawable`, which for a
+  colour source ends in `NinePatchDrawable.draw` on a rounded-rect nine-patch the
+  app generates at runtime (blur3's `NinePatchBuilder`). With the blur hidden that
+  drawable is at **alpha 0** — and atlas painted it anyway: `nDrawNinePatch`'s
+  shortcut for a cell the chunk declares a solid colour did
+  `SkPaint::setColor(cell_color)`, which replaces the paint's alpha as well as its
+  colour. The centre cell of a capsule is the two-pixel band where the corner arcs
+  meet, hence one seam at the pill's midpoint; on a taller card the same cell
+  covers the whole middle, and the seams are its top and bottom edges.
+- **Finding it was a bisect, and the hooks are worth reusing.** Temporary
+  property-gated tracing in `BaseCanvas`/`Canvas` (log every wide draw with its
+  bounds, clip and matrix), a `atl.debug.skipchild=<class>` early return in
+  `ViewGroup.drawChild`, and `atl.debug.nopatch` to drop nine-patches altogether.
+  Skipping the nine-patch made the seam disappear, which named the file. None of
+  it is committed; re-add what a similar hunt needs.
+- **`ATL_NO_DAMAGE=1` rules out the other explanation.** atlas repaints only
+  `ViewRootImpl.mDirty` (`ATLWindow.c`), so a band that is never re-damaged keeps
+  a stale colour, which looks exactly like this. It is not that: the seam is
+  unchanged with damage tracking off.
+- **`GRID_UNIT_PX` sets the port's density, which is how a phone's scale is
+  reproduced on the desktop.** atlas derives `DisplayMetrics.DENSITY_DEVICE` from
+  it (8 px per grid unit = 1x), so `GRID_UNIT_PX=21 ./run.sh` runs at the
+  oneplus11's 2.625 and `run.log` prints `density = 2.625` on start. Take the
+  value from the device's own session (`/proc/$(pgrep -x lomiri)/environ`), not
+  from `/etc/ubuntu-touch-session.d/`, which holds one file per device.
+- **The device can be driven from here after all.** `click/device.sh` runs, stops,
+  logs and screenshots the click over ssh: `mirscreencast -n 2 --stdout` against
+  `/run/user/<uid>/mir_socket` gives a raw RGBA frame, which `convert` turns into
+  a PNG. Two caveats: it captures whatever is in the foreground, so it is useless
+  while somebody is using the phone, and an app started from ssh gets no
+  `GRID_UNIT_PX` unless the script copies it out of Lomiri's environment —
+  without it the app runs at density 1 and looks nothing like the phone.
+  `lomiri-app-launch <pkg>_<app>_<version>` starts it as Lomiri would.
+- **Driving the UI after a theme switch is unreliable, and it is not a hang.** A
+  click can take several seconds to have an effect (the ANR detector dumps every
+  30 s throughout, with an empty `main` stack), a tap can be consumed as a list
+  scroll, and after a theme change the main-tab bar stopped switching tabs
+  entirely. Opening the Settings overflow menu left a half-drawn "Log Out" popup
+  that ate every click and Escape, with no exception in `out/run.log` — the
+  input-eating freeze from the section above, but without a throw behind it.

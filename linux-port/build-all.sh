@@ -118,6 +118,9 @@ step_checks() {
 	# so the image gets metadata for all of them and not just the two a session
 	# happens to take.
 	"$PORT_DIR/check-tlstore.sh"
+	# A nine-patch drawn at alpha 0 paints nothing. Pixel-level and cheap, and
+	# the bug it guards was only visible as a hairline on the phone.
+	"$PORT_DIR/check-ninepatch.sh"
 }
 
 step_image() {

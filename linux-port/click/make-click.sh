@@ -32,4 +32,6 @@ echo
 echo "built:"
 find "$PORT_OUT/click" -name '*.click' -printf '  %p (%s bytes)\n' 2>/dev/null || true
 echo
-echo "install it with:  clickable install --ssh phablet@<device>"
+# hostname only: clickable prepends phablet@ itself, and phablet@phablet@host
+# fails with a bare "Permission denied (publickey)"
+echo "install it with:  clickable install --ssh <device>"

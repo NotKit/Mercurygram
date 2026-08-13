@@ -240,3 +240,13 @@
   boot jars, GLFW, `libskia.so`) come from the sibling ART packaging's build tree
   through `click/stage-prebuilt.sh`, which writes a `PROVENANCE.md` beside them.
   Nothing else may reach outside the repository: the container cannot see it.
+- `click/device.sh` drives the installed click on a phone over ssh (`$PORT_DEVICE`,
+  default oneplus11): `run`, `stop`, `log`, and `shot` for a screenshot through
+  `mirscreencast`. It captures whatever is in the foreground, so it is useless
+  while somebody is using the device, and an app started from ssh needs
+  `GRID_UNIT_PX` copied out of Lomiri's environment or it runs at density 1.
+  `lomiri-app-launch <pkg>_<app>_<version>` starts it the way Lomiri would.
+- A defect that only shows on the phone is usually the phone's *density*, not its
+  GPU: `GRID_UNIT_PX=21 ./run.sh` reproduces the oneplus11's 2.625 here, and the
+  desktop loop is a hundred times faster than build-install-shoot. Try it before
+  blaming the backend.
