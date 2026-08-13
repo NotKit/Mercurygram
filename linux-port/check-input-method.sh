@@ -351,6 +351,7 @@ echo
 echo "input method check passed:"
 echo "  focusing the field activated the context and asked for the panel"
 echo "  '$text' reached the input method as surroundingText, cursor at ${#text}"
+echo "  the emoji survived as valid UTF-8: ${emoji_line#*text=}"
 echo "  the send reset the input method and pushed an empty surrounding text"
 echo "  leaving the field released the context and hid the panel"
 echo "  screenshots in $shots/im-*.png"

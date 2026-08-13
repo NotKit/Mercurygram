@@ -178,6 +178,12 @@
   leaving a dead JVM with its window still up (0% CPU, no repaints, no input).
   "The UI froze" means "read `files/logs/*.txt` for `FATAL/tmessages`"; `run.sh`
   fails the run on it.
+- The other freeze leaves no `FATAL` at all: a throw from a click handler is
+  caught in `ViewRootImpl.dispatchTouchEvent`, and one from a `Handler` callback
+  is cleared by the GLib dispatch in `android_os_MessageQueue.c`. The app keeps
+  running with a half-built menu over it that eats every touch, `run.sh` still
+  says "no uncaught exceptions", and the only evidence is a bare Java stack
+  trace in `out/run.log`. Grep it for `Exception` before believing a green run.
 - App code written for Android can depend on libcore *behaviour*, not just
   classes: `SvgHelper` switches on SAX's `localName`, which Xerces leaves empty
   unless the parser is namespace-aware. Such a fix goes in the shim as the class
