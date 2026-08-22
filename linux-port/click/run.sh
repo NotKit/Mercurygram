@@ -39,6 +39,12 @@ mkdir -p "${ANDROID_APP_DATA_DIR}"
 # logging; on the device the journal is the only log there is.
 export ANDROID_LOG_TAGS="${ANDROID_LOG_TAGS:-*:V}"
 
+# Without this the launcher opens its default 960x540 window and Lomiri resizes
+# it to the panel afterwards; the app then lays out for the full screen while the
+# surface still holds the small buffer, and the right/bottom of the UI is cut off
+# for good (the layout size only changes once, so nothing redraws it).
+export ATL_FORCE_FULLSCREEN=1
+
 # Lomiri never marks the app surface "maximized", so atlas's heuristic would
 # report multi-window and Telegram would never store the keyboard height it
 # measured (the sibling ART packaging carries the same line).

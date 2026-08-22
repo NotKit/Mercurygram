@@ -3697,3 +3697,192 @@ regression test.
   entirely. Opening the Settings overflow menu left a half-drawn "Log Out" popup
   that ate every click and Escape, with no exception in `out/run.log` — the
   input-eating freeze from the section above, but without a throw behind it.
+
+## The window that stayed 960x540 while the app laid out for the screen
+
+A screenshot from the phone showed the app painted into the top-left 960x540 of
+the 1280x2775 screen, with "Start Messaging" running off the right edge and
+unpressable. The window size and the layout size had come apart: atlas opens at
+the launcher's default and Lomiri resizes it afterwards, and the frame in
+between is laid out for one size and drawn into a buffer of the other.
+
+- **The screenshot's own geometry names both sizes.** The painted area is
+  exactly 960x540 — `main-executable-hotspot/main.c`'s hardcoded default, which
+  `click/run.sh` never overrode with `-w/-h`. The button is 320dp wide
+  (`IntroActivity` caps it there) and centred in its parent; at the phone's
+  density 3.375 that is 1080px, and it starts 100px from the left, so the parent
+  was **1280px** — the full screen. Both numbers come out of one PNG, which is
+  quicker than any amount of reading.
+- **Density is the constant that makes the arithmetic work.** `GRID_UNIT_PX=27`
+  on this phone, so `DENSITY_DEVICE` is 540 and density is 3.375; the 48dp
+  button measures 162px in the image. Getting this first turns "some layout is
+  wrong" into an equation with one unknown.
+- **atlas takes the layout size, the canvas size and the GL viewport all from
+  `glfwGetFramebufferSize`** (`ATLWindow.c`), and relayouts only when that value
+  *changes*. So a frame drawn while the reported size has moved on but the
+  surface has not is not corrected later — the window stays wrong for the rest
+  of the run, which is why this looked like a fixed misconfiguration rather than
+  a startup race.
+- **A clean launch is fine, which is what made it a race.** Launched through
+  `lomiri-app-launch` with `ATL_DEBUG_DAMAGE=1`, the first frame is
+  `damage 0,0-1280,2775 (full) of 1280x2775`: Lomiri does hand the app the whole
+  screen, and atlas lays out correctly when the configure lands before the first
+  draw.
+- **Fixed by never resizing.** `ATL_FORCE_FULLSCREEN` was documented in atlas's
+  `doc/Envs.md` but implemented nowhere; it now opens the window on the primary
+  monitor (`atl_window_new`), and `click/run.sh` sets it. The launchers also stop
+  publishing the *requested* size to `Display` and publish what the window
+  actually got, since `Display` backs `getMetrics()`/`getSize()`.
+- **Size the window from the monitor's work area, never from its video mode.**
+  The first attempt used `glfwGetVideoMode`, and the app came up **2856x1280**:
+  a phone panel's mode is the unrotated one, and the compositor is what turns it
+  portrait. `glfwGetMonitorWorkarea` is the rotation-aware number. `atl_screen_size()`
+  still reads the video mode, so anything else that grows a use for it inherits
+  the same trap.
+- **`Configuration.screenWidthDp` was pixels, not dp.**
+  `android_content_Context.c` filled `screenWidthDp`/`screenHeightDp` from
+  `atl_screen_size()` — the monitor, in pixels. Telegram recomputes its whole
+  `displaySize` from those fields (`AndroidUtilities.checkDisplaySize`), so at
+  density 3.375 it was laying out for 4320px. Invisible on the desktop port,
+  where density is 1 and px == dp; wrong on any device that sets `GRID_UNIT_PX`.
+  Now the app window, converted to dp.
+- **`click/device.sh` does not work on this phone.** `mirscreencast` fails with
+  "No appropriate client platform module found" on pixel9, so `device.sh shot`
+  is unavailable (it works on the oneplus11). Starting the click over ssh also
+  segfaults in `glfwInit` -> `wl_proxy_get_version`, so `device.sh run` is out
+  too; `lomiri-app-launch <pkg>_<app>_<version>` is the way in, and app-unit
+  environment can be injected with `systemctl --user set-environment` (the unit
+  inherits it — this is how `ATL_DEBUG_DAMAGE` got in).
+
+## The freeze with no FATAL is the intro screen's GL thread
+
+"No button can be touched" was not an input bug. The app was deadlocked, and a
+deadlocked app never reaches `glfwPollEvents()`, so touch is never *read* --
+which from the outside is indistinguishable from touch not being delivered. The
+last frame stays on screen because the compositor still holds its buffer.
+
+- **The tell is the main thread's `wchan`.** `futex_wait_queue` where a healthy
+  idle GLib loop sits in `do_sys_poll`, with 11s of CPU over 1h39m. `/proc/<pid>/
+  task/<tid>/wchan` answers this in one command; SIGQUIT does not, because the
+  VM cannot reach a safepoint to print the dump -- that silence is itself the
+  signature of a native deadlock, and is why this freeze "leaves no FATAL".
+- **The chain.** atlas's `EGLImpl.eglCreateWindowSurface` handles Surface,
+  SurfaceView and SurfaceHolder, and throws `UnsupportedOperationException` for
+  a `SurfaceTexture` (the branch is commented out with a FIXME, untouched since
+  2026-02). `IntroActivity$EGLThread.run()` is `initied = initGL(); super.run();`
+  so the throw skips `super.run()`, and `DispatchQueue` counts its `syncLatch`
+  down *inside* `run()`. Every later `postRunnable`/`getHandler` calls
+  `syncLatch.await()`, so the first one from the UI thread blocks it for good.
+- **Only reachable logged out.** The `TextureView` that feeds `EGLThread` is the
+  intro screen's animated logo. Every earlier device session started from a
+  transplanted session and went straight to the chat list, which is why a
+  six-month-old gap surfaced now and looked like a recent regression.
+- **Degrade, do not throw.** `EGLImpl` now returns `EGL_NO_SURFACE` for a
+  SurfaceTexture instead of throwing: Telegram already checks for it
+  (`createWindowSurface failed`), `initGL` returns false, `super.run()` runs and
+  the latch opens. The app stays alive and responsive; the animated logo stays
+  blank until atlas can render into a SurfaceTexture. That is now implemented --
+  see below.
+
+## Rendering GL into a SurfaceTexture: a pbuffer read back into the mailbox
+
+`eglCreateWindowSurface(SurfaceTexture)` works now
+(`api-impl-jni/egl/surface_texture_target.c`), and with it the intro logo. Nine
+call sites in the app hand a SurfaceTexture straight to EGL -- the intro, the
+camera preview and the round-video recorder, the photo editor, the paint view,
+the premium icon, and the spoiler and delete effects -- so this is the path
+almost every GL view here takes.
+
+- **A window surface was never an option.** `ANativeWindow_fromSurface()` returns
+  NULL in this windowing stack, so Surface and SurfaceView get no EGL window
+  either; the wl_subsurface bring-up would be a much bigger job. It would also
+  not help: the consumer is Skia in the window's own GL context on another
+  thread, sharing no buffers with the app's, so the frame has to come back
+  through the CPU whatever the producer is. `check-surface-texture-gl.sh` is the
+  check; the readback costs 4.3 ms for a full-screen frame on llvmpipe, and is
+  skipped entirely whenever the view has not taken the previous frame.
+- **The surface must keep the app's EGLConfig.** A single-sample pbuffer under a
+  4x-MSAA context is `EGL_BAD_MATCH` at `eglMakeCurrent` -- multisampling is part
+  of config compatibility, so the fallback config search matches the app's colour,
+  depth *and* sample counts. Both phones' EGL and Mesa give the intro's own
+  config (`EGL_SURFACE_TYPE` defaults to `EGL_WINDOW_BIT`) a pbuffer bit anyway.
+- **A pbuffer cannot be resized**, and apps do not recreate the surface when the
+  TextureView changes size -- they just move the viewport. It is made at the
+  size the SurfaceTexture has when the app asks, so `TextureView` had to stop
+  announcing the texture from a `post()` in `onAttachedToWindow` (size 0x0 before
+  the first layout) and announce it from `onSizeChanged` instead. A view that
+  later grows is read back clipped, once with a warning.
+
+## Two GL gaps behind it, either of which is an invisible app
+
+With the surface working the logo was still blank: the app drew, no GL error,
+nothing appeared. Both causes are the kind that only a pixel check finds.
+
+- **`GLUtils.texImage2D` uploaded a NULL pixel pointer.** It read `Bitmap.bytes`,
+  a field nothing has filled in since the SkBitmap rewrite;
+  `AndroidBitmap_lockPixels` is what returns the pixels. `glTexImage2D` with NULL
+  data is not an error -- it makes a *complete* texture full of zeroes, so every
+  textured draw is a fully transparent quad and the frame is just the clear
+  colour. All 24 intro textures were empty.
+- **`libandroid/bitmap.h` had invented its own `ANDROID_BITMAP_FORMAT_*`
+  numbering** (a plain 0-based sequence) while `Bitmap.Config` stores the NDK's
+  (RGBA_8888 = 1, RGB_565 = 4, RGBA_4444 = 7, A_8 = 8). An ARGB_8888 bitmap read
+  back as RGBA_4444, so the upload type was `GL_UNSIGNED_SHORT_4_4_4_4`. The
+  header is also what NDK apps compile against, so the NDK's numbers are the ones
+  that had to stay.
+- **`get_nio_buffer` read libcore's `_elementSizeShift`**, which the JDK's
+  `java.nio.Buffer` does not have, so *every* GL call taking an NIO buffer threw
+  `NoSuchFieldError` -- `glVertexAttribPointer` included, i.e. anything drawing
+  from Java rather than from its own JNI. The element width now comes from the
+  buffer's type.
+
+## The app's EGL display is not the window's on X11
+
+`bionic_eglGetDisplay(NULL)` handed apps `glfwGetEGLDisplay()`, which is
+`EGL_NO_DISPLAY` unless GLFW created its contexts through EGL -- and on X11 it
+uses GLX. Telegram's `initGL` stopped at the first line with "eglGetDisplay
+failed", on the desktop only; the phone's Wayland path always had a display. It
+falls back to `eglGetDisplay(EGL_DEFAULT_DISPLAY)` now. Nothing passes buffers
+between the app's GL and the window's, so they do not have to share a display.
+
+- **A GL check has to run off the main thread.** `eglMakeCurrent` from the main
+  thread fails with `EGL_BAD_ACCESS` while GLFW's own context is current there.
+  Every GL view in the app already has its own thread; `SurfaceTextureGLCheck`
+  had to grow one.
+
+## Asking Lomiri for fullscreen crashes Lomiri
+
+`ATL_FORCE_FULLSCREEN=1` in `click/run.sh` made `atl_window_new` pass a monitor
+to `glfwCreateWindow`, i.e. a real fullscreen toplevel. On the pixel9 that took
+the whole shell down three times in four minutes, always with the same abort:
+
+```
+lomiri[5229]: ASSERT: "extraInfo->previousState != Mir::MinimizedState" in file
+              ./src/platforms/mirserver/wrappedwindowmanagementpolicy.cpp, line 661
+lomiri-full-greeter.service: Main process exited, code=dumped, status=6/ABRT
+```
+
+- **The app is the victim, not the culprit.** Its own `status=6/ABRT` five
+  seconds later is just `Wayland display got fatal error 104: Connection reset
+  by peer / The display is now unusable, aborting.` -- the compositor it was
+  talking to had died. Read the *shell's* journal before the app's; the app's
+  looks like a crash of its own.
+- **qtmir keeps a shadow window state beside Mir's**, and only half of it is
+  maintained. `requestState()` (the shell's own path) sets `previousState`;
+  `advise_state_change()` -- where a *client*-driven change arrives -- updates
+  `state` and leaves `previousState` stale. `activate()` restores a minimised
+  window to `previousState` and asserts it is not itself Minimized.
+- **So a client that drives its own state is what breaks it.** Nothing else the
+  app does matters; it only has to ask once.
+- **Not subsurfaces.** The `TODO: wl_subsurface.visiblity not implemented`
+  warnings on this phone are real but unrelated: zero of them fall inside the
+  crash windows, and they appear in hours when the app was not running.
+- **Fixed on both sides.** atlas sizes the window to
+  `glfwGetMonitorWorkarea` and passes no monitor, so no state is ever requested
+  -- Lomiri hands an app the whole screen unasked, so the request bought
+  nothing. qtmir maintains `previousState` in `advise_state_change` too, and
+  `activate()` falls back to `RestoredState` instead of aborting.
+- **The journal could not isolate the variable.** The app only ever ran in one
+  boot, always with the flag set, so there is no before/after in the log; the
+  mechanism came from reading qtmir 0.7.2's source, whose line numbers match the
+  installed build.
