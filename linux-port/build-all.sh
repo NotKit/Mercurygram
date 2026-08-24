@@ -121,6 +121,9 @@ step_checks() {
 	# A nine-patch drawn at alpha 0 paints nothing. Pixel-level and cheap, and
 	# the bug it guards was only visible as a hairline on the phone.
 	"$PORT_DIR/check-ninepatch.sh"
+	# sans-serif is the bundled Roboto, not whatever fontconfig substitutes.
+	# Silent otherwise: the text still draws, at the wrong size.
+	"$PORT_DIR/check-fonts.sh"
 }
 
 step_image() {
