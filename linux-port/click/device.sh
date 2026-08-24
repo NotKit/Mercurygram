@@ -49,7 +49,20 @@ dev_stop() {
 	# The launcher ignores SIGTERM; anchor the pattern so this does not match the
 	# shell ssh started it from. Lomiri starts the versioned path from the desktop
 	# file while run above goes through 'current', so match either.
-	"${SSH[@]}" "pkill -9 -f '^/opt/click.ubuntu.com/$PKG/[^/]+/lib/android-translation-layer-hotspot ' || true"
+	#
+	# Verify, do not assume. A stop that quietly leaves the app running means the
+	# next 'run' is a second client on the same auth key, and Telegram answers
+	# that with 406 AUTH_KEY_DUPLICATED and an "Authorization error" dialog.
+	local pat="^/opt/click.ubuntu.com/$PKG/[^/]+/lib/android-translation-layer-hotspot "
+	"${SSH[@]}" "
+		for i in 1 2 3; do
+			pkill -9 -f '$pat' 2>/dev/null || true
+			sleep 1
+			pgrep -f '$pat' >/dev/null 2>&1 || { echo stopped; exit 0; }
+		done
+		echo 'device.sh: launcher still running after three SIGKILLs' >&2
+		pgrep -af '$pat' >&2
+		exit 1"
 }
 
 # One frame off the compositor. mirscreencast writes raw RGBA at the panel's
