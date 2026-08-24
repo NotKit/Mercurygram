@@ -195,6 +195,13 @@ cp "$ATLAS_OUT/api-impl.jar" "$ATLAS_OUT/framework-res.apk" "$INSTALL_DIR/atlas/
 mkdir -p "$INSTALL_DIR/atlas/system/etc"
 cp "$ATLAS_OUT/system/etc/fonts.xml" "$INSTALL_DIR/atlas/system/etc/"
 
+# The bundled Roboto faces the framework lays text out against. On the desktop
+# it finds them beside its own library; here the natives are in lib/ and the
+# atlas data in atlas/, so run.sh points ATL_FONT_DIR at this.
+mkdir -p "$INSTALL_DIR/atlas/system/fonts"
+cp "$ATLAS_OUT/system/fonts"/*.ttf "$ATLAS_OUT/system/fonts/NOTICE" \
+   "$INSTALL_DIR/atlas/system/fonts/"
+
 cp "$PORT_OUT/shim.jar" "$INSTALL_DIR/classpath/"
 cp "$HOST_OUT"/classpath/*.jar "$INSTALL_DIR/classpath/"
 cp "$HOST_OUT/app.apk" "$INSTALL_DIR/app.apk"

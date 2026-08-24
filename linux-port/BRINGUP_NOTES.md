@@ -230,11 +230,15 @@ One entry per problem: symptom → cause → where it is handled.
   wording expects one; the library exports statically named
   `Java_android_*` entry points instead, so loading it produces no log line of
   its own. Verify it by calling into it, not by watching for `JNI_OnLoad`.
-- **`fonts.xml` is dead weight here.** Only atlas's own executable looks at
-  `/system/etc/fonts.xml`, through the bionic-shim path-override table in
-  `src/main-executable/libc_bio_path_overrides.c`; the framework itself uses
-  Skia's fontconfig `SkFontMgr` (`hwui/TypefaceCollection.cpp`). Copied for
-  reference at `out/atlas/system/etc/fonts.xml`.
+- **`fonts.xml` is not parsed at runtime, but it is not dead weight either.**
+  Only atlas's own executable looks at `/system/etc/fonts.xml`, through the
+  bionic-shim path-override table in `src/main-executable/libc_bio_path_overrides.c`.
+  The framework builds its collections in `hwui/TypefaceCollection.cpp`: the
+  generic families from the Roboto faces atlas now ships (`res/fonts/`,
+  installed to `system/fonts`), everything else from Skia's fontconfig
+  `SkFontMgr`. The face-and-weight table in that file is `fonts.xml`'s
+  sans-serif family transcribed, which is why the file is still copied to
+  `out/atlas/system/etc/fonts.xml` — see "sans-serif was never Roboto" below.
 - **`framework-res.apk` carries no code** (2480 entries, zero `.class`/`.dex`).
   atlas puts it on `java.class.path` purely so the resource table can be found;
   on HotSpot that is just an extra zip on the classpath.
@@ -3697,6 +3701,93 @@ regression test.
   entirely. Opening the Settings overflow menu left a half-drawn "Log Out" popup
   that ate every click and Escape, with no exception in `out/run.log` — the
   input-eating freeze from the section above, but without a throw behind it.
+
+## sans-serif was never Roboto, and the metrics showed it
+
+Text on the port did not match Android at the same `textSize`, and the font was
+the reason: `TypefaceCollection.cpp` asked fontconfig for `sans-serif`, which on
+this desktop is Noto Sans and on Ubuntu Touch is Ubuntu. Neither is Roboto.
+atlas now ships `res/fonts/` — the twelve faces `res/fonts.xml` names for
+sans-serif — and builds the generic families from them. `check-fonts.sh`
+(`tools/FontMetricsCheck.java`) is the regression test; it needs no boot.
+
+- **The line box was 16% too tall.** Skia reports `hhea` ascent/descent, and Noto
+  Sans's is 1.069/-0.293 em against Roboto's 0.928/-0.244 — 1.362 em of line
+  against 1.172. Every line in the app was laid out too tall, which is the part
+  that reads as "the font size is different" even though the x-heights are within
+  1% of each other (0.536 against 0.528 em).
+- **Only the regular weight was wrong, which made it worse.** Telegram bundles
+  its own Roboto for medium, extra-bold, italic, mono and condensed
+  (`assets/fonts/rmedium.ttf` and friends) and only falls back to the system
+  font for regular text, so the port was drawing Roboto Medium headings above
+  Noto Sans body text. On the intro screen the title measured pixel-identical
+  before and after the fix and the two body lines shrank 2-3%.
+- **fontconfig answered every `sans-serif-*` alias with the same file.** The
+  `light`/`regular`/`medium` widths were byte-identical (8372 px for the test
+  pangram at 400 px) because `matchFamilyStyle` substitutes freely and
+  `make_family` only ever asked for the four canonical styles. The bundled table
+  states each face's weight explicitly — `Roboto-Thin`'s own OS/2 says 250 where
+  fonts.xml declares 100 — and `make_typeface` carries the alias's weight as the
+  base weight, so `Typeface.create("sans-serif-medium", …)` is a real 500.
+- **Black has to precede Bold in the table.** `FontFamily::getClosestMatch` keeps
+  the first of two equally distant faces, and a bolded 500 asks for 800, which is
+  100 from either. fonts.xml orders the faces that way for exactly this reason;
+  the transcription keeps the order.
+- **The port is smaller than Waydroid because Lomiri says 420 dpi and Waydroid
+  says 480 — and both are laying out correctly.** Side by side on the oneplus11
+  at 1080x2349, the chat row pitch is 185 px on the port and 211 px under
+  Waydroid. `DialogCell` in `DialogsActivity` measures
+  `dp(heightDefault) + (useSeparator ? 1 : 0)` with `heightDefault = 70` and
+  `dp()` a `ceil`, so the prediction is `ceil(70 x 2.625) + 1 = 185` at Lomiri's
+  420 and `ceil(70 x 3.0) + 1 = 211` at Waydroid's 480. Both land exactly, and
+  the dialog avatar agrees independently (130 px / 2.625 = 49.5 dp against
+  145 px / 3.0 = 48.3 dp). Nothing in atlas's dp arithmetic is wrong; the gap is
+  the two platforms' own scale.
+- **Compare against another runtime's scale with `ATL_DENSITY_DPI`.** It
+  overrides `GRID_UNIT_PX` outright in `DisplayMetrics.getDeviceDensity`, which
+  matters because the grid unit can only say multiples of 20 dpi (density is
+  `20 x GRID_UNIT_PX`). `click/device.sh run --dpi 480` puts the port at
+  Waydroid's scale on the phone. A ratio between two screenshots is not enough to
+  conclude anything here — check the measurement against the app's own dp
+  constant, or a swapped pair of images will read as a density bug that is not
+  there.
+- **For 480 specifically, prefer `GRID_UNIT_PX=24`.** It is the same density by
+  the normal path and it renders cleanly. `ATL_DENSITY_DPI=480` against Lomiri's
+  own `GRID_UNIT_PX=21` gets the scale right (row pitch 211, Waydroid's exactly)
+  but leaves the app drawn into a bottom-right 860x1768 of the 1080x2412 surface,
+  the rest never painted. It is a repaint artifact, not layout:
+  `ATL_NO_DAMAGE=1` fills the screen at the same dpi, and atlas logs the same
+  `sized to the primary monitor's work area, 1080x2412` either way. atlas
+  repaints only `ViewRootImpl.mDirty`, so the area exposed while the window
+  settles is never damaged.
+- **A stop that does not stop costs the session.** `click/device.sh stop` used to
+  `pkill` and return without checking. One silent failure left an instance
+  running, the next `run` was a second client on the same auth key, and Telegram
+  answered `406 AUTH_KEY_DUPLICATED` — which the app surfaces as a modal
+  "Authorization error … Log out". Do **not** take that button: the session is
+  not revoked, `tgnet.dat` and `userconfing.xml` are untouched, and a clean
+  relaunch clears it. `dev_stop` now SIGKILLs up to three times and fails loudly
+  if anything survives.
+- **The faces are found beside the framework's library**, at `system/fonts`
+  relative to `libtranslation_layer_main.so` (`dladdr`), which is the desktop's
+  one flat `out/atlas/`. The click splits natives (`lib/`) from atlas data
+  (`atlas/`), so `click/run.sh` sets `ATL_FONT_DIR` instead. Without either the
+  framework falls back to fontconfig and logs it.
+- **Hinting is not a deviation.** AOSP's `Paint(int)` has the density-dependent
+  `setHinting` commented out behind a TODO, and atlas carries the same commented
+  block, so both leave Skia's default (`kNormal`). It does cost width: at 12-24 px
+  the pangram measures 2.3-2.9% wider than the font's own advances, and Skia
+  rounds each advance to a whole pixel whatever `setSubpixelText`/`setLinearText`
+  say. That is Android's behaviour too — don't "fix" it without a device to
+  compare against.
+- **`ANTI_ALIAS_FLAG` was not reaching the glyphs.** `apply_flags` set
+  `SkPaint::setAntiAlias`, but text is rasterised from `SkFont::getEdging`, whose
+  default is `kAntiAlias` — so a paint with the flag *off* still drew antialiased
+  text. AOSP's `applyLegacyFlagsToFont` sets edging, embedded bitmaps and forced
+  auto-hinting from the same flags; atlas now mirrors it, and `AndroidPaint()`
+  starts at `kAlias` the way AOSP's `Paint()` does. No visual change in the app
+  (every app paint sets the flag) — the intro screen is pixel-identical — but the
+  check now counts 94 grey levels with the flag and exactly 2 without.
 
 ## The window that stayed 960x540 while the app laid out for the screen
 

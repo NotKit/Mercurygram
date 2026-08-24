@@ -314,6 +314,7 @@ is rebuilt whenever the builddir is configured anew — `--clean` and
 | `out/atlas/libatl_webview_qt.so` | optional Qt WebEngine WebView backend |
 | `out/atlas/framework-res.apk` | framework resource table (goes on the classpath) |
 | `out/atlas/system/etc/fonts.xml` | copied for reference only, see below |
+| `out/atlas/system/fonts/Roboto-*.ttf` | the sans-serif family, read by the framework |
 | `out/atlas/artifacts.env`, `ARTIFACTS.md` | generated paths and provenance |
 
 The jar to put on a HotSpot classpath is **`hax-stripped.jar`**, atlas's javac
@@ -325,8 +326,15 @@ natives dir (`java.library.path`): the installed
 `libandroid.so.0` resolve from the same flat directory, and the AOSP support
 libraries (`libandroidfw`, `liblog`, `libbase`, …) from `/usr/local/lib/art`.
 
-`fonts.xml` is not read on this path: atlas resolves fonts through Skia's
-fontconfig `SkFontMgr`, and the only consumer of `/system/etc/fonts.xml` is the
+`system/fonts/` is read by the framework: `TypefaceCollection.cpp` builds
+`sans-serif` and its weight aliases from those twelve Roboto faces, found beside
+`libtranslation_layer_main.so` (`ATL_FONT_DIR` overrides the location). Without
+them the generic names fall back to fontconfig, which answers Noto Sans here and
+Ubuntu on the phone — neither has Android's metrics. `check-fonts.sh` is the
+regression test.
+
+`fonts.xml` itself is not read on this path. It is where that face-and-weight
+table comes from, but the only consumer of `/system/etc/fonts.xml` is the
 path-override table in atlas's own executable, which belongs to the bionic shim
 the port does not use.
 

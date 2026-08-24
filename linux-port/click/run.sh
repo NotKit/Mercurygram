@@ -50,6 +50,11 @@ export ATL_FORCE_FULLSCREEN=1
 # measured (the sibling ART packaging carries the same line).
 export ATL_MULTI_WINDOW=0
 
+# The framework builds sans-serif from the Roboto faces atlas ships. It looks for
+# them beside its own library, which works for the desktop's one flat dir but not
+# here: the natives are in lib/ and the atlas data in atlas/.
+export ATL_FONT_DIR="${PKG_ROOT}/atlas/system/fonts"
+
 # Wayland app_id must match the desktop file id (<pkg>_<app>_<version>) for
 # Lomiri to associate the window with the launcher entry.
 if [ -z "${APP_ID:-}" ] && [ -L "/opt/click.ubuntu.com/${PKG_NAME}/current" ]; then
