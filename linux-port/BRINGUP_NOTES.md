@@ -3977,3 +3977,65 @@ lomiri-full-greeter.service: Main process exited, code=dumped, status=6/ABRT
   boot, always with the flag set, so there is no before/after in the log; the
   mechanism came from reading qtmir 0.7.2's source, whose line numbers match the
   installed build.
+
+## Four ways the port's text differed from Android, and the two left
+
+Comparing the same chat side by side against Waydroid on the oneplus11 (both at
+density 3.0, 16sp message text = 48 px) turned up four distinct causes. Measure
+them from screenshots: line pitch by autocorrelating the row ink profile of a
+wrapped block, stroke weight as summed alpha coverage plus stem width at half
+maximum, advance behaviour as the ink span of a known string.
+
+- **Lines ran 14% tall: `Paint`'s SkFont was fontconfig's face, not the
+  collection's.** A fresh `Paint` reported `ascent=-51.312 descent=14.064` (Noto
+  Sans hhea, 1069/-293 per 1000 upem) while `measureText` and drawing went
+  through minikin's Roboto. Naming *any* typeface fixed it, which is what hid it
+  from `FontMetricsCheck` -- every case there set one. `atl_default_typeface()`
+  is deleted; `paint_set_typeface()` now sets `AndroidPaint::typeface` and the
+  SkFont together from `typeface_init_default()`. Pitch 64.99 px -> 57.00 px
+  against Waydroid's 56.99.
+- **Do not derive a line box from arithmetic alone.** 65 px also equals
+  `floor(fTop)+ceil(fBottom)` for Roboto's glyph bbox (2163/-555), and equals
+  the OS/2 typo box, and equals Noto Sans's hhea. Three candidates fit the same
+  number; only a probe printing `getFontMetricsInt()` inside the port told them
+  apart. Skia reads `face->ascender`/`descender` (hhea) unless
+  `fsSelection` bit 7 is set, and Roboto does not set it.
+- **Emphasis text was double-bolded.** `AndroidUtilities.getTypeface` relabels
+  `fonts/rmedium.ttf` (a 500 face) as weight 700 through `Typeface.Builder`,
+  which on Android overrides the file's OS/2 value so the request matches
+  exactly. The port collapsed the exact weight onto a legacy `BOLD`, so minikin's
+  `computeFakery` saw 700 wanted against 500 actual and `MinikinSkia` emboldened
+  it. `Typeface.Builder` now carries weight/italic to
+  `typeface_family_from_file`, which declares them via
+  `minikin::Font::Builder::setWeight`/`setSlant` -- the same override
+  `BUNDLED_SANS` uses. "Colbys" ink 3296 -> 2555 against Waydroid's 2506.
+  Honest `getStyle()`/`getWeight()` also stop `StyleSpan(BOLD)` over an already
+  bold app font from synthesising a second time.
+- **`TextUtils.concat` dropped every span**, so `TranslateButton`'s one-character
+  `"x"` placeholder under an `ImageSpan` drew as a literal x instead of the
+  translate icon. It is AOSP's `copySpansFrom` implementation now. ~100 Telegram
+  call sites use it, so this was degrading more than the one icon.
+
+Two deviations remain, both measured and both deliberately left:
+
+- **Text gamma.** AOSP builds Skia with `SK_GAMMA_APPLY_TO_A8`,
+  `SK_GAMMA_EXPONENT=1.4`, `SK_GAMMA_CONTRAST=0.0`; stock defaults are sRGB and
+  contrast 0.5, so partial-coverage pixels come out far more opaque
+  (alpha_port ~= alpha_android^0.6, edge quartile 0.60 vs 0.26, stems 4.7 vs 3.7
+  px). Text reads slightly bolder and harder-edged, and is +2-4% ink. Invisible
+  at 1:1, obvious at 6x. The fix is `skia_use_fixed_gamma_text=true` in
+  `subprojects/packagefiles/skia/meson.build`, but it forces a full Skia
+  rebuild -- carry it in whenever Skia is next rebuilt for another reason.
+- **Advance rounding.** `measureText` of a sample line is 759 px against the
+  linear 754; Android keeps advances fractional, the port rounds each to a whole
+  pixel, so lines run 0-0.8% wide and drift up to ~6.5 px over 26 glyphs. AOSP's
+  `Paint` defaults and `packPaintFlags` match the port's exactly, so this is a
+  build difference, not an API one -- try `skia_use_system_freetype2=false`
+  before forcing linear metrics in `AndroidPaint`.
+
+Also seen and not chased: colour emoji render monochrome (minikin prefers a mono
+symbols font over CBDT `Noto Color Emoji`), `Paint.getTextBounds` bypasses
+minikin so every character the primary face lacks reports identical `.notdef`
+bounds, and the grey pill where a contact-name emoji belongs is Telegram's own
+sprite path (`Emoji.java:382` draws it when `emojiBmp` is still null), not font
+fallback.
