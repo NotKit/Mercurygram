@@ -1,7 +1,7 @@
 #!/bin/bash
 # Drive the installed click on an Ubuntu Touch device over ssh:
 #
-#   click/device.sh run [--no-gpu] [-- <extra launcher args>]
+#   click/device.sh run [--no-gpu] [--dpi N] [-- <extra launcher args>]
 #   click/device.sh stop
 #   click/device.sh shot out/screenshots/foo.png
 #   click/device.sh log [journalctl args]
@@ -21,14 +21,19 @@ RUNDIR='/run/user/$(id -u)'
 usage() { sed -n '2,9p' "$0" >&2; exit 2; }
 
 dev_run() {
-	local nogpu="" args=()
+	local nogpu="" dpi="" args=()
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--no-gpu) nogpu="MERCURYGRAM_NO_GPU=1"; shift ;;
+		# An explicit density, for comparing against another runtime's scale.
+		# GRID_UNIT_PX below can only say multiples of 20 dpi, and this overrides
+		# it outright ($ATL_DENSITY_DPI in the environment does the same).
+		--dpi) dpi="ATL_DENSITY_DPI=$2"; shift 2 ;;
 		--) shift; args=("$@"); break ;;
 		*) usage ;;
 		esac
 	done
+	[ -n "$dpi" ] || [ -z "${ATL_DENSITY_DPI:-}" ] || dpi="ATL_DENSITY_DPI=$ATL_DENSITY_DPI"
 	# GRID_UNIT_PX comes from Lomiri's own environment: atlas derives the display
 	# density from it, and started from ssh without it the app runs at density 1,
 	# which is not what the phone shows.
@@ -36,7 +41,7 @@ dev_run() {
 	# SIGTERM (linux-port/CLAUDE.md), so stop below has to use SIGKILL anyway.
 	"${SSH[@]}" "export XDG_RUNTIME_DIR=$RUNDIR; \
 		export \$(tr '\\0' '\\n' < /proc/\$(pgrep -x lomiri | head -1)/environ | grep '^GRID_UNIT_PX='); \
-		$nogpu setsid nohup $PKG_ROOT/run.sh ${args[*]:-} \
+		$nogpu $dpi setsid nohup $PKG_ROOT/run.sh ${args[*]:-} \
 		>/tmp/mercurygram-jvm.log 2>&1 < /dev/null & sleep 1; echo started"
 }
 
