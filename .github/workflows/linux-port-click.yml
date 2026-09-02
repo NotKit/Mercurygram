@@ -36,11 +36,21 @@ jobs:
             TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg \
             TMessagesProj/jni/dav1d TMessagesProj/jni/libvpx
 
+      # Not /usr/local/lib/android: that is the runner's Android SDK, and AGP
+      # needs it to configure the Android modules even though -PlinuxPort keeps
+      # the port's build away from the NDK. Without it Gradle fails outright
+      # with "SDK location not found" on :TMessagesProj_PluginTor.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+          sudo rm -rf /usr/share/dotnet /opt/ghc \
                       /usr/local/.ghcup /usr/local/share/boost || true
           df -h /
+
+      - name: Check the Android SDK is where Gradle expects
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          [ -d "${ANDROID_HOME:-/nonexistent}" ] ||
+            { echo "no Android SDK: Gradle cannot configure the Android modules" >&2; exit 1; }
 
       - uses: actions/setup-java@v4
         with:
