@@ -259,6 +259,44 @@ rm -rf "$INSTALL_DIR/jvm"
 	{ echo "jlink produced no lib/server/libjvm.so" >&2; exit 1; }
 log "  JVM image: $(du -sh "$INSTALL_DIR/jvm" | cut -f1)"
 
+# The base CDS archive. jlink does not write one, and without it HotSpot refuses
+# the app archive run.sh asks for on the device -- silently, to its cds log only,
+# so every run would pay full class loading with run.sh doing nothing.
+#
+# A CDS archive is architecture-specific, so this has to be the arm64 java:
+# native on an arm64 builder, otherwise qemu-user (about 8 s). jlink's
+# --generate-cds-archive is no help, it runs the image's own java too.
+#
+# Not fatal. The click works without it, only slower.
+log "dumping the base CDS archive"
+jvm_java="$INSTALL_DIR/jvm/bin/java"
+if [ "$(uname -m)" = "aarch64" ]; then
+	cds_run=("$jvm_java")
+elif command -v qemu-aarch64-static >/dev/null; then
+	cds_run=(qemu-aarch64-static "$jvm_java")
+elif command -v qemu-aarch64 >/dev/null; then
+	cds_run=(qemu-aarch64 "$jvm_java")
+else
+	cds_run=()
+	echo "  !! no qemu-aarch64 -- shipping without a base CDS archive" >&2
+fi
+if [ ${#cds_run[@]} -gt 0 ]; then
+	# -Xshare:dump writes lib/server/classes.jsa, which is where the runtime
+	# looks with no -XX:SharedArchiveFile, so the launcher needs no extra flag.
+	"${cds_run[@]}" -Xshare:dump >"$BUILD_DIR/cds-dump.log" 2>&1 ||
+		echo "  !! -Xshare:dump failed, see $BUILD_DIR/cds-dump.log" >&2
+fi
+if [ -f "$INSTALL_DIR/jvm/lib/server/classes.jsa" ]; then
+	log "  base CDS archive: $(du -h "$INSTALL_DIR/jvm/lib/server/classes.jsa" | cut -f1)"
+else
+	echo "  !! no jvm/lib/server/classes.jsa -- AppCDS will be off on the device" >&2
+fi
+
+# The class-path (app) archive is deliberately NOT built here: HotSpot records
+# each entry's size and mtime, so one made against this build tree is stale the
+# moment the click is installed. run.sh creates it on the device, in the cache
+# directory, with -XX:+AutoCreateSharedArchive on top of the base above.
+
 install -m 0755 "$CLICK_DIR/run.sh" "$INSTALL_DIR/run.sh"
 cp "$CLICK_DIR/$HOOK.desktop" "$CLICK_DIR/$HOOK.apparmor" "$CLICK_DIR/$HOOK.svg" "$INSTALL_DIR/"
 

@@ -87,6 +87,47 @@ export ATL_UGLY_ENABLE_MICROPHONE=1
 # update with Gson. It is most of what the app writes to the journal and it costs
 # real CPU on the device. Append -X "-Dtmessages.tldump=1" to bring it back.
 
+# --- AppCDS -----------------------------------------------------------------
+# The archive holds the parsed, verified form of the classes the app loads, so
+# start-up skips most of the class loading. It is a cache, not a dependency, and
+# the VM writes it at exit -- so it has to live somewhere writable, which the
+# package directory is not.
+#
+# -XX:+AutoCreateSharedArchive (JDK 19+) uses a valid archive and writes a fresh
+# one when it is missing or stale. Two details make that less automatic than it
+# sounds, both learned in the sibling fenix click:
+#   * HotSpot records each class-path entry's size AND mtime, and a mismatch is
+#     a warning to the cds log plus a silent fallback -- invisible from outside.
+#     So fingerprint the class path the same way and treat a mismatch as a run
+#     that has to write one.
+#   * the archive is written mode 444, so a stale one cannot be replaced in
+#     place; it has to be removed first or every later run falls back for ever.
+#
+# This layers on the base archive build.sh dumped into jvm/lib/server/classes.jsa.
+# MERCURYGRAM_CDS=off turns the whole thing off.
+CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/${PKG_NAME}"
+mkdir -p "${CACHE}"
+CDSOPT=""
+if [ "${MERCURYGRAM_CDS:-auto}" != off ]; then
+    JSA="${CACHE}/app.jsa"
+    CDSOPT="-X -XX:+AutoCreateSharedArchive -X -XX:SharedArchiveFile=${JSA}"
+    CDSOPT="${CDSOPT} -X -Xlog:cds=warning:file=${CACHE}/cds.log"
+    rm -f "${CACHE}/cds.log"
+    CDSFP="$(ls -lLn --time-style=+%s "${PKG_ROOT}"/classpath/*.jar \
+        "${PKG_ROOT}/atlas/api-impl.jar" 2>/dev/null |
+        awk '{print $5, $6, $NF}' | md5sum | cut -d" " -f1)"
+    if [ ! -f "${JSA}" ] || [ "${CDSFP}" != "$(cat "${JSA}.fp" 2>/dev/null)" ]; then
+        echo "CDS: archive missing or stale -- this run writes one"
+        rm -f "${JSA}" "${JSA}.fp"
+    fi
+    # The archive is written on the way out of the VM, which is past the exec
+    # below: nothing in this script runs again to record what it was written
+    # against, so write the fingerprint now. A run that dies before producing an
+    # archive does not fool the next one -- that check is "archive missing OR
+    # fingerprint differs", and a missing archive alone forces a fresh write.
+    [ -n "${CDSFP}" ] && printf '%s' "${CDSFP}" > "${JSA}.fp"
+fi
+
 exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --api-impl-jar "${PKG_ROOT}/atlas/api-impl.jar" \
     --framework-res "${PKG_ROOT}/atlas/framework-res.apk" \
@@ -97,5 +138,6 @@ exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     -X "-Dtmessages.native.path=${PKG_ROOT}/lib/libtmessages.so" \
     -X "-Dtmessages.contenthub=1" \
     -X "-Dtmessages.tldump=0" \
+    ${CDSOPT} \
     "$@" \
     "${PKG_ROOT}/app.apk"

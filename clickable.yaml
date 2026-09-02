@@ -39,6 +39,9 @@ dependencies_host:
   - zstd
   - patch
   - git
+  # qemu-user: the base CDS archive is arch-specific, so build.sh dumps it by
+  # running the click's own arm64 java. Skipped (with a warning) if absent.
+  - qemu-user-static
 
 dependencies_target:
   # atlas: libtranslation_layer_main.so and libandroid.so.0

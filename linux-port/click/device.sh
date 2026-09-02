@@ -46,7 +46,8 @@ dev_run() {
 }
 
 dev_stop() {
-	# The launcher ignores SIGTERM; anchor the pattern so this does not match the
+	# SIGTERM does not stop the launcher (the VM hangs in its exit), so this ends
+	# in SIGKILL either way; anchor the pattern so it does not match the
 	# shell ssh started it from. Lomiri starts the versioned path from the desktop
 	# file while run above goes through 'current', so match either.
 	#
@@ -54,7 +55,26 @@ dev_stop() {
 	# next 'run' is a second client on the same auth key, and Telegram answers
 	# that with 406 AUTH_KEY_DUPLICATED and an "Authorization error" dialog.
 	local pat="^/opt/click.ubuntu.com/$PKG/[^/]+/lib/android-translation-layer-hotspot "
+	local jsa="\$HOME/.cache/$PKG/app.jsa"
 	"${SSH[@]}" "
+		# SIGTERM first, and not because it stops anything: HotSpot's own handler
+		# runs the shutdown sequence, which is when -XX:+AutoCreateSharedArchive
+		# writes the AppCDS archive. Go straight to SIGKILL and that never
+		# happens, so every later start pays full class loading. The VM then
+		# hangs in the exit (linux-port/CLAUDE.md), which is why SIGKILL still
+		# follows.
+		pkill -TERM -f '$pat' 2>/dev/null || true
+		prev=-1
+		for i in \$(seq 1 20); do
+			pgrep -f '$pat' >/dev/null 2>&1 || break
+			size=\$(stat -c %s '$jsa' 2>/dev/null || echo -1)
+			# The dump is done once the archive has stopped growing. No archive
+			# after 8 s means CDS is off or this run wrote nothing: stop waiting.
+			[ \"\$size\" = -1 ] && [ \"\$i\" -ge 8 ] && break
+			[ \"\$size\" != -1 ] && [ \"\$size\" = \"\$prev\" ] && break
+			prev=\$size
+			sleep 1
+		done
 		for i in 1 2 3; do
 			pkill -9 -f '$pat' 2>/dev/null || true
 			sleep 1

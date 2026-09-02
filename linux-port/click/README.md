@@ -120,11 +120,42 @@ build is an image input. The x86_64 metadata would not do: it was traced with
 `ATL_NO_GPU=1` and the device runs Ganesh, and under a closed world a class that
 only the GPU path reaches is a `NoClassDefFoundError` on the phone.
 
-Dropped along the way, none of it reachable at runtime: 30 MB of CDS archives
-(`classes*.jsa`, rebuilt per-JDK anyway), 11 MB of `ct.sym` (javac's historical
-API data), and `include/`. jlink also writes a real `cacerts` (109 upstream CAs)
+Dropped along the way, none of it reachable at runtime: 11 MB of `ct.sym`
+(javac's historical API data) and `include/`. The JDK's own `classes*.jsa` go
+too, but a base CDS archive is dumped back for the target arch afterwards (see
+"AppCDS" below). jlink also writes a real `cacerts` (109 upstream CAs)
 rather than Debian's symlink into `/etc/ssl/certs`, which is what
 `--copy-unsafe-links` used to work around.
+
+### AppCDS
+
+The click ships a **base** CDS archive and creates the **app** archive on the
+device, the same split the sibling fenix click uses.
+
+`build.sh` dumps the base one after jlink (`-Xshare:dump` writes
+`jvm/lib/server/classes.jsa`, exactly where the runtime looks when no
+`-XX:SharedArchiveFile` is given). A CDS archive is architecture-specific, so
+that has to run the click's own arm64 `java`: native on an arm64 builder,
+otherwise `qemu-user-static` (hence its entry in `dependencies_host`). It is not
+fatal if it fails — the click just starts slower — but it is load-bearing for the
+app archive: a dynamic archive layers on a base one, and without a base HotSpot
+refuses the flag and says so only in its cds log.
+
+`run.sh` asks for the app archive with `-XX:+AutoCreateSharedArchive
+-XX:SharedArchiveFile=$XDG_CACHE_HOME/mercurygram-jvm.nekit/app.jsa`, which the
+VM writes at exit — so it lives in the cache directory, not in the read-only
+package. Two traps, both already paid for in fenix:
+
+* HotSpot records each class-path entry's **size and mtime**; a mismatch is a
+  warning to the cds log and a silent fallback. `run.sh` fingerprints
+  `classpath/*.jar` plus `atlas/api-impl.jar` the same way and forces a rewrite
+  when it differs — which is what makes a reinstall pick up a fresh archive.
+* the archive is written mode 444, so a stale one has to be **removed**, not
+  overwritten, or every later run falls back for ever.
+
+`MERCURYGRAM_CDS=off` disables both. `$XDG_CACHE_HOME/mercurygram-jvm.nekit/cds.log`
+holds the warnings, and is the place to look when start-up is slow.
+
 
 ## Status
 
