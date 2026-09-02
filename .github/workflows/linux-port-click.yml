@@ -57,13 +57,12 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # The x86_64 half: the app's jars and app.apk from Gradle, and the compat
-      # shim. Both are architecture-independent and the click build consumes
-      # them straight out of linux-port/out/.
-      - name: Build the arch-independent halves
-        run: |
-          linux-port/build-classpath.sh
-          linux-port/build-shim.sh
+      # The x86_64 half: the app's jars and app.apk from Gradle. That is all the
+      # container cannot make itself -- it builds the shim in there, against the
+      # arm64 api-impl.jar, so building one here would mean building atlas here
+      # too, which is exactly what the SDK exists to avoid.
+      - name: Build the app jars and apk
+        run: linux-port/build-classpath.sh
 
       - name: Install clickable
         run: pipx install clickable-ut

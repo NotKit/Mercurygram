@@ -13,9 +13,13 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
 
-for f in "$PORT_OUT/app.apk" "$PORT_OUT/shim.jar" "$PORT_OUT/classpath"; do
+# Only what the container cannot produce itself. Not shim.jar: build.sh runs
+# build-shim.sh inside the container against the arm64 api-impl.jar and ships
+# that build, so a host-side one is never consumed -- and demanding it would
+# mean building atlas on the host just to satisfy the check.
+for f in "$PORT_OUT/app.apk" "$PORT_OUT/classpath"; do
 	[ -e "$f" ] || {
-		echo "missing $f: run linux-port/build-all.sh first" >&2
+		echo "missing $f: run linux-port/build-classpath.sh first" >&2
 		exit 1
 	}
 done
