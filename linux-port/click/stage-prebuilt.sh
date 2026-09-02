@@ -125,8 +125,14 @@ force=0
 [ "${1:-}" = "--force" ] && force=1
 
 if [ -f "$OUT/PROVENANCE.md" ] && [ "$force" = 0 ]; then
-	echo "click-prebuilt is already staged in $OUT (--force to redo)"
-	exit 0
+	# Only skip when what is staged came from the source we resolved. An SDK
+	# bump otherwise leaves the old framework in place and the click silently
+	# ships it -- the download alone does not restage anything.
+	if grep -qF "| source | \`$SRC_DESC\` |" "$OUT/PROVENANCE.md"; then
+		echo "click-prebuilt is already staged in $OUT (--force to redo)"
+		exit 0
+	fi
+	echo "restaging click-prebuilt: source is now $SRC_DESC"
 fi
 
 # Everything under lib/art that libandroidfw needs at runtime, and nothing else:
