@@ -20,6 +20,10 @@
 #   libskia.so + skia headers     skia's gn build is not driven from atlas's meson
 #                                 and does not cross-compile from it.
 #
+# With prebuilt atlas (the default) the framework is not compiled here at all,
+# so only the first entry and GLFW are staged; the rest are build-time inputs
+# that just the from-source fallback needs.
+#
 # Source: the sibling ART click packaging's arm64 build tree ($UT_ATL_PREBUILT),
 # which builds all of the above natively. See README.md for how to (re)create it.
 #
@@ -39,6 +43,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
 # ATL_SDK_TAG: auto (default) derives sdk-<sha> from the atlas checkout and falls
 # back to the local tree when that release has nothing for us; off|none forces
 # the local tree; an explicit sdk-<sha> is an error if it cannot be used.
+#
+# PORT_ATLAS_PREBUILT=0 builds atlas from source even when an SDK is available.
+# The default takes the SDK's, which skips the framework compile entirely.
 ATL_SDK_REPO="${ATL_SDK_REPO:-NotKit/atl-touch}"
 ATL_SDK_TAG="${ATL_SDK_TAG-auto}"
 ATL_PREBUILT="${UT_ATL_PREBUILT:-/home/nekit/UT/mercurygram-click-packaging/build/aarch64-linux-gnu/app}"
@@ -137,8 +144,8 @@ for lib in "${art_libs[@]}"; do
 done
 cp -a "$SRC_STAGE"/lib/libglfw.so* "$OUT/usr/lib/"
 
-if [ -n "$SDK_DIR" ] && [ -n "${PORT_ATLAS_PREBUILT:-}" ]; then
-	# --- prebuilt atlas -------------------------------------------------
+if [ -n "$SDK_DIR" ] && [ "${PORT_ATLAS_PREBUILT:-1}" != 0 ]; then
+	# --- prebuilt atlas (the default) -----------------------------------
 	# The SDK's atlas links libcontent-hub-glib.so.1 rather than the lomiri
 	# soname a from-source build here picks. Neither is preinstalled, so the
 	# click bundles it -- clickable.yaml has the runtime package for that.
@@ -170,7 +177,7 @@ if [ -n "$SDK_DIR" ] && [ -n "${PORT_ATLAS_PREBUILT:-}" ]; then
 	cp "$SDK_DIR/usr/share/atl/system/fonts"/*.ttf \
 	   "$SDK_DIR/usr/share/atl/system/fonts/NOTICE" "$OUT/atlas/system/fonts/"
 else
-	# --- atlas is built from source ---------------------------------------
+	# --- atlas is built from source (no SDK, or PORT_ATLAS_PREBUILT=0) ----
 	# Then the framework build's own inputs have to be staged too.
 	for f in "$SRC_STAGE/lib/java/core-all_classes.jar" "$SRC_SKIA_LIB" \
 	         "$SRC_SKIA_INC/core/SkCanvas.h"; do
@@ -205,6 +212,26 @@ else
 	skia_rev=$(git -C "$ATLAS_SKIA_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
 fi
 
+if [ -d "$OUT/atlas" ]; then
+	ATLAS_ROWS="| atlas/ | the framework itself and libskia.so, taken prebuilt |"
+	# The SDK's libskia.so has no libjpeg DT_NEEDED, so it vendors its own and
+	# does not hit what the ART packaging's build does.
+	SKIA_CAVEAT="This libskia.so came from the SDK and links no system libjpeg, so the sampled
+JPEG decode crash the ART packaging's build has (BRINGUP_NOTES.md) should not
+apply here. Not yet exercised on-device."
+else
+	ATLAS_ROWS="| usr/lib/java/*.jar | javac's -bootclasspath for api-impl (ART's libcore, not the JDK's) |
+| usr/lib/lib*_bio.so* | atlas's configure-time \`cc.find_library\` only |
+| usr/include/{androidfw,GLFW} | headers for the above |
+| skia/ | libskia.so for the target plus the headers atlas compiles against |"
+	SKIA_CAVEAT="The one behavioural caveat: this libskia.so came from the ART packaging, built
+with \`skia_use_system_libjpeg_turbo=true\`. The port builds skia with it false,
+because libjpeg-turbo 3.x segfaults in
+\`SkJpegCodec::onGetScaledDimensions\` — see BRINGUP_NOTES.md. Sampled JPEG
+decodes (any thumbnail) are therefore expected to crash until skia is rebuilt
+for arm64 with the port's own gn args."
+fi
+
 cat >"$OUT/PROVENANCE.md" <<EOF
 # arm64 prebuilt inputs for the Ubuntu Touch click
 
@@ -220,18 +247,10 @@ Staged by \`linux-port/click/stage-prebuilt.sh\`; do not edit, do not commit.
 | Here | What needs it |
 | --- | --- |
 | usr/lib/art/*.so | libtranslation_layer_main.so's DT_NEEDED (libandroidfw, liblog) and their own |
-| usr/lib/java/*.jar | javac's -bootclasspath for api-impl (ART's libcore, not the JDK's) |
-| usr/lib/lib*_bio.so* | atlas's configure-time \`cc.find_library\` only |
 | usr/lib/libglfw.so* | atlas's window/input backend |
-| usr/include/{androidfw,GLFW} | headers for the above |
-| skia/ | libskia.so for the target plus the headers atlas compiles against |
+$ATLAS_ROWS
 
-The one behavioural caveat: this libskia.so came from the ART packaging, built
-with \`skia_use_system_libjpeg_turbo=true\`. The port builds skia with it false,
-because libjpeg-turbo 3.x segfaults in
-\`SkJpegCodec::onGetScaledDimensions\` — see BRINGUP_NOTES.md. Sampled JPEG
-decodes (any thumbnail) are therefore expected to crash until skia is rebuilt
-for arm64 with the port's own gn args.
+$SKIA_CAVEAT
 EOF
 
 echo "staged $(du -sh "$OUT" | cut -f1) of arm64 prebuilt inputs in $OUT"

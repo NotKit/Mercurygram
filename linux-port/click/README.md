@@ -25,11 +25,10 @@ has to be cross-compiled:
 | Piece | Built | By |
 | --- | --- | --- |
 | app jars, `app.apk` | host, x86_64 | `build-classpath.sh` |
-| `api-impl.jar` | in the container by the host JDK's javac | `build-atlas.sh` |
-| atlas natives, HotSpot launcher | in the container, arm64 | `build-atlas.sh` |
+| `api-impl.jar`, atlas natives, HotSpot launcher | not built: taken from the ATL SDK | `stage-prebuilt.sh` |
 | `libtmessages.so` + boringssl/libvpx/dav1d/ffmpeg | in the container, arm64 | `native/build_*_linux.sh` |
 | `shim.jar` + `libportshim.so` | in the container (the `.so` is arm64) | `build-shim.sh` |
-| art support libs, ART boot jars, GLFW, `libskia.so` | outside, prebuilt | `stage-prebuilt.sh` |
+| art support libs, GLFW | outside, prebuilt | `stage-prebuilt.sh` |
 
 The port's own scripts do all of it. `PORT_ARCH=arm64` (see `env.sh`) is the
 whole switch: it picks the `aarch64-linux-gnu-*` toolchain, the arm64 JDK for
@@ -42,26 +41,39 @@ container only mounts the project root and the build needs
 
 ## The prebuilt inputs
 
-`stage-prebuilt.sh` copies five things out of the ART packaging's arm64 build
-tree (`$UT_ATL_PREBUILT`) into `linux-port/out/click-prebuilt/`, because the
-container cannot see outside this repository. `PROVENANCE.md` in that directory
-records exactly what came from where. In short:
+`stage-prebuilt.sh` fills `linux-port/out/click-prebuilt/` with what the
+container cannot produce, because it cannot see outside this repository.
+`PROVENANCE.md` in that directory records exactly what came from where.
+
+The source is the **ATL SDK** the atl-touch CI publishes per commit
+(`atl-sdk-arm64.tar.zst` on release `sdk-<sha>`); `atl-sdk.tag` pins the one CI
+uses. `ATL_SDK_TAG=off` falls back to the sibling ART packaging's arm64 build
+tree (`$UT_ATL_PREBUILT`), which builds the same things natively — a multi-hour
+build, which is precisely what the SDK avoids repeating.
+
+By default **atlas is not built at all**: the framework, its natives, the
+HotSpot launcher and `libskia.so` come straight from the SDK, laid out exactly
+as `build-atlas.sh` would install them so `build.sh` cannot tell the difference.
+Only two things are staged alongside:
 
 - **art support libs** (`libandroidfw`, `liblog`, and their four dependencies) —
   `libtranslation_layer_main.so` genuinely links them. `libart.so` itself is
   *not* copied: nothing in this port loads ART, so `build.sh` puts an empty
   `libart.so`/`libnativebridge.so` on the link line, which `--as-needed` drops.
-- **ART's boot jars** — javac compiles api-impl against ART's libcore.
-- **`dx`** — atlas's meson resolves the program at configure time even though
-  the port never dexes anything.
-- **`bionic_translation` stubs** — only to satisfy `cc.find_library('c_bio')`.
-- **`libskia.so` + skia's `include/`** — atlas's meson drives skia's gn build,
-  and that does not cross-compile from there. `-Dskia-prebuilt=DIR` (added on the
-  port's atlas branch) links a ready-made one instead.
+- **GLFW 3.4** — atlas needs the libdecor init hint; noble ships 3.3.
 
-To (re)create that tree: `cd /home/nekit/UT/mercurygram-click-packaging &&
-clickable build` — a multi-hour native arm64 build, which is precisely what this
-package avoids repeating.
+`PORT_ATLAS_PREBUILT=0` builds atlas from source instead, and then the framework
+build's own inputs are staged too: ART's boot jars (javac compiles api-impl
+against ART's libcore), `dx` (atlas's meson resolves the program at configure
+time even though the port never dexes anything), the `bionic_translation` stubs
+(only to satisfy `cc.find_library('c_bio')`), and skia's headers next to
+`libskia.so` — atlas's meson drives skia's gn build and that does not
+cross-compile from there, so `-Dskia-prebuilt=DIR` links a ready-made one.
+
+One difference worth knowing: a from-source atlas links Lomiri's content-hub
+fork, while the SDK's links the original `libcontent-hub-glib.so.1`. Neither is
+on the device, so `clickable.yaml` carries both and `build.sh` bundles whichever
+one is named.
 
 ## Layout of the click
 

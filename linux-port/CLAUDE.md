@@ -235,10 +235,14 @@
   with a static check — every staged object is aarch64, and every `DT_NEEDED` is
   either bundled or in `click/device-libs.txt`, the device's own `ldconfig -p`.
   Re-record that file when the device's release changes.
-- The click's arm64 inputs that are not built here (art's `libandroidfw`, ART's
-  boot jars, GLFW, `libskia.so`) come from the sibling ART packaging's build tree
-  through `click/stage-prebuilt.sh`, which writes a `PROVENANCE.md` beside them.
-  Nothing else may reach outside the repository: the container cannot see it.
+- The click's arm64 inputs that are not built here come from the ATL SDK release
+  (`click/atl-sdk.tag` pins it) through `click/stage-prebuilt.sh`, which writes a
+  `PROVENANCE.md` beside them. By default that includes atlas itself — the click
+  does not compile the framework, so a framework change reaches it by way of an
+  atl-touch commit, an SDK release and a new tag, not a local rebuild.
+  `PORT_ATLAS_PREBUILT=0` builds it from source, and `ATL_SDK_TAG=off` falls back
+  to the sibling ART packaging's tree. Nothing else may reach outside the
+  repository: the container cannot see it.
 - `click/device.sh` drives the installed click on a phone over ssh (`$PORT_DEVICE`,
   default oneplus11): `run`, `stop`, `log`, and `shot` for a screenshot through
   `mirscreencast`. It captures whatever is in the foreground, so it is useless
