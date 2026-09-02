@@ -50,8 +50,16 @@ if [ -n "$ATL_SDK_TAG" ] && [ "$ATL_SDK_TAG" != off ] && [ "$ATL_SDK_TAG" != non
 	forced=1
 	if [ "$ATL_SDK_TAG" = auto ]; then
 		forced=""
+		# The atlas checkout when there is one, so a local build follows whatever
+		# the framework is sitting at. There is none in CI (atlas is gitignored
+		# and never cloned there), so fall back to the tag pinned in the repo --
+		# which is also what makes a CI build reproducible.
 		sha=$(git -C "$ATLAS_DIR" rev-parse --short=7 HEAD 2>/dev/null || true)
 		sdk_tag="${sha:+sdk-$sha}"
+		if [ -z "$sdk_tag" ] && [ -f "$PORT_DIR/click/atl-sdk.tag" ]; then
+			sdk_tag=$(tr -d '[:space:]' <"$PORT_DIR/click/atl-sdk.tag")
+			echo "no atlas checkout; using the pinned SDK $sdk_tag"
+		fi
 	fi
 	if [ -z "$sdk_tag" ]; then
 		echo "no atlas checkout to derive an SDK tag from; using $ATL_PREBUILT"

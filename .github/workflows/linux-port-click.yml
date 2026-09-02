@@ -72,8 +72,9 @@ jobs:
       # for them) from the atl-touch SDK release matching the atlas commit.
       - name: Build the click
         env:
-          # No atlas checkout here, so name the SDK explicitly rather than
-          # deriving it from one.
+          # auto: no atlas checkout exists here, so this resolves to the tag
+          # pinned in linux-port/click/atl-sdk.tag. Set the repo variable to
+          # override it for a one-off build.
           ATL_SDK_TAG: ${{ vars.ATL_SDK_TAG || 'auto' }}
         run: linux-port/click/make-click.sh
 
