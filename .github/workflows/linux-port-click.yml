@@ -64,6 +64,19 @@ jobs:
       - name: Build the app jars and apk
         run: linux-port/build-classpath.sh
 
+      # build-atlas.sh compiles the framework in the container, so the sources
+      # have to be here. Pinned to the commit the SDK was built from
+      # (click/atl-sdk.tag), so the framework and the prebuilt libraries it
+      # links against come from the same atlas. skia is not cloned: the staged
+      # prebuilt provides libskia.so and its headers (-Dskia-prebuilt).
+      - name: Check out atlas at the pinned commit
+        run: |
+          sha=$(tr -d '[:space:]' < linux-port/click/atl-sdk.tag)
+          sha=${sha#sdk-}
+          git clone --filter=blob:none https://github.com/NotKit/atl-touch.git linux-port/atlas
+          git -C linux-port/atlas checkout --detach "$sha"
+          git -C linux-port/atlas --no-pager log --oneline -1
+
       - name: Install clickable
         run: pipx install clickable-ut
 
