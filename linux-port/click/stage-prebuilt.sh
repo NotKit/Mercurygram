@@ -139,13 +139,9 @@ cp -a "$SRC_STAGE"/lib/libglfw.so* "$OUT/usr/lib/"
 
 if [ -n "$SDK_DIR" ] && [ -n "${PORT_ATLAS_PREBUILT:-}" ]; then
 	# --- prebuilt atlas -------------------------------------------------
-	# Off by default, and not because it does not work: the published SDK is
-	# built in the ubuntu-touch-24.04-2.x container, where content-hub's glib
-	# binding is still libcontent-hub-glib.so.1. This click is 24.04-1.x, whose
-	# container and devices only have it under the lomiri name, so the SDK's
-	# libtranslation_layer_main.so names a library no phone here can resolve and
-	# click/build.sh rejects the tree. Needs an SDK built for 1.x (an atl-touch
-	# CI matrix entry) before this can be the default.
+	# The SDK's atlas links libcontent-hub-glib.so.1 rather than the lomiri
+	# soname a from-source build here picks. Neither is preinstalled, so the
+	# click bundles it -- clickable.yaml has the runtime package for that.
 	# The SDK carries every artifact the port builds atlas for, so the click
 	# does not compile the framework at all. That drops everything the
 	# framework build needed and the app does not: the androidfw/GLFW/skia

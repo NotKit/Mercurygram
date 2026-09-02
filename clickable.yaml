@@ -65,8 +65,13 @@ dependencies_target:
   - libfontconfig-dev
   - libmaliit-glib-dev
   # content-hub import: meson takes this as optional, so without it the
-  # ATLContentHub natives are dropped and the attach sheet falls back silently
+  # ATLContentHub natives are dropped and the attach sheet falls back silently.
   - liblomiri-content-hub-glib-dev
+  # The SDK's prebuilt atlas links the original soname instead of Lomiri's fork.
+  # Neither is on the device (it ships liblomiri-content-hub.so.1, a different
+  # library), so that one has to travel too -- runtime package only, because the
+  # two -dev packages ship the same header and dpkg refuses to co-install them.
+  - libcontent-hub-glib1
   - libxkbcommon-dev
   - libgbm-dev
   - libicu-dev
