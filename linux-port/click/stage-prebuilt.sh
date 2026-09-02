@@ -28,10 +28,81 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
 
+# Two possible sources, in order:
+#
+#   1. the ATL SDK the atl-touch CI publishes per commit (atl-sdk-<arch>.tar.zst
+#      on release sdk-<sha>). Self-contained and needs nothing outside this repo,
+#      which is what lets the click build in CI.
+#   2. the sibling ART packaging's arm64 build tree ($UT_ATL_PREBUILT), which
+#      builds the same things natively. Machine-local.
+#
+# ATL_SDK_TAG: auto (default) derives sdk-<sha> from the atlas checkout and falls
+# back to the local tree when that release has nothing for us; off|none forces
+# the local tree; an explicit sdk-<sha> is an error if it cannot be used.
+ATL_SDK_REPO="${ATL_SDK_REPO:-NotKit/atl-touch}"
+ATL_SDK_TAG="${ATL_SDK_TAG-auto}"
 ATL_PREBUILT="${UT_ATL_PREBUILT:-/home/nekit/UT/mercurygram-click-packaging/build/aarch64-linux-gnu/app}"
-SRC_STAGE="$ATL_PREBUILT/stage/usr"
-SRC_SKIA_LIB="$ATL_PREBUILT/atlas-build/subprojects/skia/libskia.so"
-SRC_SKIA_INC="${ATLAS_SKIA_DIR}/include"
+
+SDK_DIR=""
+sdk_tag=""
+if [ -n "$ATL_SDK_TAG" ] && [ "$ATL_SDK_TAG" != off ] && [ "$ATL_SDK_TAG" != none ]; then
+	sdk_tag="$ATL_SDK_TAG"
+	forced=1
+	if [ "$ATL_SDK_TAG" = auto ]; then
+		forced=""
+		sha=$(git -C "$ATLAS_DIR" rev-parse --short=7 HEAD 2>/dev/null || true)
+		sdk_tag="${sha:+sdk-$sha}"
+	fi
+	if [ -z "$sdk_tag" ]; then
+		echo "no atlas checkout to derive an SDK tag from; using $ATL_PREBUILT"
+	else
+		dl="$PORT_OUT/downloads"; mkdir -p "$dl"
+		archive="$dl/atl-sdk-$PORT_ARCH-$sdk_tag.tar.zst"
+		url="https://github.com/$ATL_SDK_REPO/releases/download/$sdk_tag/atl-sdk-$PORT_ARCH.tar.zst"
+		if [ ! -f "$archive" ] && ! curl -Lf --retry 3 -o "$archive.tmp" "$url"; then
+			rm -f "$archive.tmp"
+			[ -z "$forced" ] || { echo "SDK $sdk_tag not downloadable: $url" >&2; exit 1; }
+			echo "SDK $sdk_tag not published; using $ATL_PREBUILT"
+		else
+			[ -f "$archive" ] || mv "$archive.tmp" "$archive"
+			# The release carries a .sha256 beside the tarball; a missing one is
+			# not fatal, a mismatching one is.
+			if curl -Lf --retry 3 -so "$archive.sha256" "$url.sha256"; then
+				want=$(awk '{print $1}' "$archive.sha256")
+				have=$(sha256sum "$archive" | awk '{print $1}')
+				[ "$want" = "$have" ] || { echo "SDK $sdk_tag checksum mismatch" >&2; exit 1; }
+			fi
+			SDK_DIR="$PORT_OUT/atl-sdk/$sdk_tag"
+			rm -rf "$SDK_DIR"; mkdir -p "$SDK_DIR"
+			zstd -dc "$archive" | tar -C "$SDK_DIR" -x
+			# An SDK from before the headers were packaged cannot serve this
+			# build; say so rather than failing later inside meson.
+			if [ ! -d "$SDK_DIR/usr/include/androidfw" ] || [ ! -d "$SDK_DIR/usr/include/skia/include" ]; then
+				[ -z "$forced" ] || {
+					echo "SDK $sdk_tag has no include/ tree: it predates" >&2
+					echo "atl-touch's 'ci: ship the headers a source consumer needs'" >&2
+					exit 1
+				}
+				echo "SDK $sdk_tag has no include/ tree (predates the headers change); using $ATL_PREBUILT"
+				SDK_DIR=""
+			fi
+		fi
+	fi
+fi
+
+if [ -n "$SDK_DIR" ]; then
+	SRC_DESC="ATL SDK $sdk_tag ($ATL_SDK_REPO)"
+	SRC_STAGE="$SDK_DIR/usr"
+	SRC_SKIA_LIB="$SDK_DIR/usr/lib/libskia.so"
+	SRC_SKIA_INC="$SDK_DIR/usr/include/skia/include"
+	SRC_SKIA_MODULES="$SDK_DIR/usr/include/skia/modules"
+else
+	SRC_DESC="$ATL_PREBUILT"
+	SRC_STAGE="$ATL_PREBUILT/stage/usr"
+	SRC_SKIA_LIB="$ATL_PREBUILT/atlas-build/subprojects/skia/libskia.so"
+	SRC_SKIA_INC="${ATLAS_SKIA_DIR}/include"
+	SRC_SKIA_MODULES="${ATLAS_SKIA_DIR}/modules"
+fi
 
 OUT="$PORT_OUT/click-prebuilt"
 force=0
@@ -77,10 +148,15 @@ cp "$SRC_SKIA_LIB" "$OUT/skia/libskia.so"
 # reach into modules/ themselves (SkColorSpace.h -> modules/skcms/skcms.h). The
 # rest of the 8 GB checkout is sources and test data.
 cp -a "$SRC_SKIA_INC" "$OUT/skia/include"
-cp -a "${ATLAS_SKIA_DIR}/modules" "$OUT/skia/modules"
+cp -a "$SRC_SKIA_MODULES" "$OUT/skia/modules"
 
-art_rev=$(git -C "$ATL_PREBUILT/../../../art_standalone" rev-parse --short HEAD 2>/dev/null || echo unknown)
-skia_rev=$(git -C "$ATLAS_SKIA_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ -n "$SDK_DIR" ]; then
+	art_rev=$(sed -n 's/.*"art_standalone": *"\([^"]*\)".*/\1/p' "$SDK_DIR/meta/sdk-manifest.json" 2>/dev/null || echo unknown)
+	skia_rev="shipped with the SDK"
+else
+	art_rev=$(git -C "$ATL_PREBUILT/../../../art_standalone" rev-parse --short HEAD 2>/dev/null || echo unknown)
+	skia_rev=$(git -C "$ATLAS_SKIA_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+fi
 
 cat >"$OUT/PROVENANCE.md" <<EOF
 # arm64 prebuilt inputs for the Ubuntu Touch click
@@ -89,9 +165,9 @@ Staged by \`linux-port/click/stage-prebuilt.sh\`; do not edit, do not commit.
 
 | | |
 | --- | --- |
-| source tree | \`$ATL_PREBUILT\` |
+| source | \`$SRC_DESC\` |
 | art_standalone | \`$art_rev\` |
-| skia | \`$ATLAS_SKIA_DIR\` at \`$skia_rev\` |
+| skia | \`$skia_rev\` |
 | staged | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
 
 | Here | What needs it |

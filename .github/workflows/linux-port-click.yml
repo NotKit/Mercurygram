@@ -1,0 +1,93 @@
+name: Build Ubuntu Touch click (OpenJDK port)
+
+# The arm64 click of linux-port/: Mercurygram on OpenJDK 21 with atlas's
+# framework. Unlike the sibling ART packaging this cross-compiles, so it runs on
+# a normal x86_64 runner in minutes rather than natively in hours -- see
+# linux-port/click/README.md.
+
+on:
+  push:
+    branches: [jvm-native]
+    paths:
+      - 'linux-port/**'
+      - 'TMessagesProj/jni/**'
+      - 'clickable.yaml'
+      - '.github/workflows/linux-port-click.yml'
+  pull_request:
+    paths:
+      - 'linux-port/**'
+      - 'clickable.yaml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write   # for the release step
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the four the native build needs. td, whisper and the Tor plugin's
+      # submodules stay un-initialized on purpose (linux-port/README.md).
+      - name: Init the native submodules
+        run: |
+          git submodule update --init --depth 1 \
+            TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg \
+            TMessagesProj/jni/dav1d TMessagesProj/jni/libvpx
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost || true
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The x86_64 half: the app's jars and app.apk from Gradle, and the compat
+      # shim. Both are architecture-independent and the click build consumes
+      # them straight out of linux-port/out/.
+      - name: Build the arch-independent halves
+        run: |
+          linux-port/build-classpath.sh
+          linux-port/build-shim.sh
+
+      - name: Install clickable
+        run: pipx install clickable-ut
+
+      # stage-prebuilt.sh pulls the arm64 inputs the container cannot build
+      # (art's libandroidfw, ART's boot jars, GLFW, libskia.so and the headers
+      # for them) from the atl-touch SDK release matching the atlas commit.
+      - name: Build the click
+        env:
+          # No atlas checkout here, so name the SDK explicitly rather than
+          # deriving it from one.
+          ATL_SDK_TAG: ${{ vars.ATL_SDK_TAG || 'auto' }}
+        run: linux-port/click/make-click.sh
+
+      - name: Upload the click
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercurygram-jvm-click-arm64
+          path: linux-port/out/click/*.click
+          if-no-files-found: error
+
+      # Actions artifacts need a login to download; a prerelease does not, which
+      # is what testers actually use.
+      - name: Publish to a GitHub release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          click=$(ls linux-port/out/click/*.click)
+          version=$(basename "$click" | sed 's/^[^_]*_\([^_]*\)_.*/\1/')
+          tag="jvm-v${version}-${GITHUB_SHA::7}"
+          gh release create "$tag" \
+            --title "Mercurygram ${version} (OpenJDK port)" \
+            --prerelease \
+            --notes "Unofficial test build of Mercurygram for Ubuntu Touch 24.04 (arm64), running on a bundled OpenJDK 21 through atlas. Not a stable release." \
+            || true
+          gh release upload "$tag" "$click" --clobber
