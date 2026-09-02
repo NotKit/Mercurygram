@@ -103,9 +103,9 @@ Staged by \`linux-port/click/stage-prebuilt.sh\`; do not edit, do not commit.
 | usr/include/{androidfw,GLFW} | headers for the above |
 | skia/ | libskia.so for the target plus the headers atlas compiles against |
 
-The one behavioural caveat: this libskia.so was built by the ART packaging from
-atl-touch master, i.e. with \`skia_use_system_libjpeg_turbo=true\`. The port's
-atlas branch sets it to false because libjpeg-turbo 3.x segfaults in
+The one behavioural caveat: this libskia.so came from the ART packaging, built
+with \`skia_use_system_libjpeg_turbo=true\`. The port builds skia with it false,
+because libjpeg-turbo 3.x segfaults in
 \`SkJpegCodec::onGetScaledDimensions\` — see BRINGUP_NOTES.md. Sampled JPEG
 decodes (any thumbnail) are therefore expected to crash until skia is rebuilt
 for arm64 with the port's own gn args.

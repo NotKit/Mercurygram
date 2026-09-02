@@ -5,12 +5,11 @@
   or a JDK version in a build script — the toolchain is pinned in one place.
 - All products go under `linux-port/out/` (gitignored). Nothing generated is
   committed; scripts must be idempotent and safe to re-run.
-- `$ATLAS_DIR` is `linux-port/atlas/`: an atl-touch checkout on branch
-  `mercurygram/openjdk-port`, its own git repo, gitignored by this one. It is a
-  source dependency the port builds, not a place artifacts are copied from. Fix
-  framework bugs there as commits that could be sent upstream to atl-touch; never
-  patch atlas from this repo and never paper over a framework bug in the shim jar
-  or the launcher.
+- `$ATLAS_DIR` is `linux-port/atlas/`: an atl-touch checkout of `master`, its own
+  git repo, gitignored by this one. It is a source dependency the port builds,
+  not a place artifacts are copied from. Fix framework bugs there as commits on
+  master that go upstream to atl-touch; never patch atlas from this repo and
+  never paper over a framework bug in the shim jar or the launcher.
 - Run `check-env.sh` before debugging a build failure; it catches a wrong JDK
   (needs 21.x) and a missing atlas checkout, the two usual causes.
 - `native/build_*_linux.sh` mirror the Android `TMessagesProj/jni/build_*.sh`:

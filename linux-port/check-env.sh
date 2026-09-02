@@ -28,8 +28,12 @@ ok "libjvm: $libjvm"
 atlas_branch="$(git -C "$ATLAS_DIR" branch --show-current 2>/dev/null || true)"
 [ -n "$atlas_branch" ] || fail "$ATLAS_DIR is not a git checkout"
 ok "atlas: $ATLAS_DIR on $atlas_branch ($(git -C "$ATLAS_DIR" rev-parse --short HEAD))"
-[ "$atlas_branch" = mercurygram/openjdk-port ] ||
-	echo "note: atlas is on '$atlas_branch', the port's branch is mercurygram/openjdk-port"
+# The port builds atl-touch master. The local branch name is free, because a
+# worktree cannot check out a branch another worktree already holds, so it is
+# the upstream that has to match.
+atlas_upstream="$(git -C "$ATLAS_DIR" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+[ "$atlas_upstream" = origin/master ] ||
+	echo "note: atlas tracks '${atlas_upstream:-nothing}', the port builds atl-touch origin/master"
 
 # skia is shared between checkouts; building it from scratch is the one long step.
 # Without a tree to share, meson downloads the wrap (~8 GB) on the first build,

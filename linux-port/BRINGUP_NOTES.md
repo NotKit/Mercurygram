@@ -185,12 +185,12 @@ One entry per problem: symptom → cause → where it is handled.
   not artifacts to copy.
 - **The port builds atlas itself** (`build-atlas.sh`, replacing the first pass's
   `get-atlas-artifacts.sh`, which copied out of an external builddir). Sources:
-  `linux-port/atlas` on branch `mercurygram/openjdk-port`; builddir:
+  `linux-port/atlas`, a checkout of atl-touch `master`; builddir:
   `out/atlas-build`; install dir: `out/atlas`. The framework's javac writes
   generated JNI headers back into `src/api-impl-jni/generated_headers`, which is
-  now expected — they get committed on the atlas branch. The script diffs
-  `git status` of the checkout around the build and fails on any change outside
-  that directory.
+  now expected — they get committed on master like any other change. The script
+  diffs `git status` of the checkout around the build and fails on any change
+  outside that directory.
 - **A JDK change needs `meson setup --wipe`, not `--reconfigure`.** meson caches
   the java compiler in the builddir's coredata, so re-running configuration keeps
   whichever `javac` was found first — here the system default 25 instead of the

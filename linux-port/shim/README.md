@@ -60,7 +60,7 @@ would need it, so the next failure has an address.
 
 ## Fixed in atlas, not shimmed
 
-Commits on `linux-port/atlas` (branch `mercurygram/openjdk-port`):
+Commits on `linux-port/atlas` (atl-touch `master`):
 
 * **`api-impl: build against the JDK's java.*, not libcore's`** — api-impl was
   compiled with `-bootclasspath core-all_classes.jar`, so javac bound libcore's

@@ -8,8 +8,8 @@ PORT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PORT_DIR
 export REPO_DIR="$(cd "$PORT_DIR/.." && pwd)"
 
-# atlas (atl-touch) sources the port builds itself: an in-tree checkout on branch
-# mercurygram/openjdk-port, its own git repo, gitignored here. See README.md.
+# atlas (atl-touch) sources the port builds itself: an in-tree checkout of
+# atl-touch master, its own git repo, gitignored here. See README.md.
 export ATLAS_DIR="${ATLAS_DIR:-$PORT_DIR/atlas}"
 
 # The ~8 GB skia checkout is shared between atlas checkouts through a symlink at

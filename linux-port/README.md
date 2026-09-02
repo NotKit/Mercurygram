@@ -58,7 +58,7 @@ atlas android-translation-layer-hotspot
 | `env.sh` | shared environment (`ATLAS_DIR`, `ATLAS_SKIA_DIR`, `ATLAS_BUILDDIR`, `ATLAS_OUT`, `JAVA_HOME`, `GRAALVM_HOME`, `PORT_OUT`); source it, don't run it |
 | `build-all.sh` | every build step below, in dependency order — the one-command build |
 | `click/` | the arm64 Ubuntu Touch click: cross build and packaging, on top of everything below (`click/README.md`) |
-| `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on branch `mercurygram/openjdk-port`, gitignored here |
+| `atlas/` | the atlas (atl-touch) sources the port builds — a separate git repo on `master`, gitignored here |
 | `build-atlas.sh` | builds atlas from `atlas/` into `out/atlas-build/`, installs `out/atlas/` |
 | `check-env.sh` | toolchain smoke test; exits 0 when the environment is usable |
 | `check-graalvm.sh` | the same for `$GRAALVM_HOME`: `native-image`, the tracing agent, and that it has not shadowed `JAVA_HOME` |
@@ -249,21 +249,22 @@ before attempting login. `MG_BUILD_TAG` defaults to `$APP_VERSION_NAME.1` from
 ### atlas source checkout
 
 atlas is a **source** dependency: `linux-port/atlas/` is a checkout of
-[atl-touch](https://github.com/NotKit/atl-touch) on branch
-`mercurygram/openjdk-port`, its own git repository, gitignored by this one. The
-port builds it and may change it; framework fixes are commits on that branch,
-written so they can go upstream to atl-touch.
+[atl-touch](https://github.com/NotKit/atl-touch) `master`, its own git
+repository, gitignored by this one. The port builds it and may change it;
+framework fixes are commits on master, pushed upstream to atl-touch.
 
 On this machine it is a worktree of the existing clone, which is how to recreate
-it:
+it. The worktree gets a branch of its own tracking `origin/master`, because the
+main clone already has `master` checked out and git will not give one branch to
+two worktrees:
 
 ```sh
-git -C /home/nekit/UT/atlas worktree add \
-    /home/nekit/UT/mercurygram-src/linux-port/atlas -b mercurygram/openjdk-port
+git -C /home/nekit/UT/atlas worktree add --track -b mercurygram/master \
+    /home/nekit/UT/mercurygram-src/linux-port/atlas origin/master
 ln -s /home/nekit/UT/atlas/subprojects/skia linux-port/atlas/subprojects/skia
 ```
 
-On a machine without that clone, `git clone -b mercurygram/openjdk-port
+On a machine without that clone, `git clone -b master
 git@github.com:NotKit/atl-touch.git linux-port/atlas` is equivalent; skia is then
 downloaded by meson (`subprojects/skia`, ~8 GB — share an existing tree by
 symlink whenever possible). `ATLAS_SKIA_DIR` points at the tree to share and
@@ -277,7 +278,7 @@ and pushed to atl-touch:
 
 ```sh
 git -C linux-port/atlas commit -am "graphics: ..."
-git -C linux-port/atlas push origin mercurygram/openjdk-port
+git -C linux-port/atlas push origin HEAD:master
 ```
 
 The commit this port needs is recorded at the end of this file. atlas's javac
@@ -774,51 +775,29 @@ this config was traced with `ATL_NO_GPU=1` and the phone runs Ganesh.
 
 ## The atlas commit this port needs
 
-atlas is built from `linux-port/atlas/`, branch **`mercurygram/openjdk-port`**,
-at commit **`5755b11f`** ("api-impl: draw each panel into its own layer").
-Every build records what it used in `out/atlas/ARTIFACTS.md` and
+atlas is built from `linux-port/atlas/`, a checkout of atl-touch **`master`**, at
+commit **`86480a1d`** ("keystore: give the AndroidKeyStore provider a named
+class"). Every build records what it used in `out/atlas/ARTIFACTS.md` and
 `out/atlas/artifacts.env`.
 
-The branch carries the HotSpot launcher and the framework fixes this bring-up
-needed, all written to be upstreamable to atl-touch:
+The port no longer carries an atlas branch of its own. Everything the bring-up
+needed is in atl-touch master: the stock-JVM launcher and its `--run-class` mode,
+the native-image VM backend, the api-impl build against the JDK's `java.*`,
+minikin text shaping with the bundled Roboto families, the rest of the GLES 2.0
+binding and SurfaceTexture. Upstream reworked some of it on the way in, so the
+commits do not match the old branch one for one — master is the branch to build,
+and the branch to fix framework bugs on.
 
-```
-087b14a5 atl: use the runtime's own timezone database when it has the zone
-e0f44b8d api-impl: build against the JDK's java.*, not libcore's
-21133ad5 api-impl: hand the attribute buffers to JNI instead of raw addresses
-fce22823 add a launcher for running apps on a stock JVM
-b70ac451 hotspot launcher: add --run-class
-8d0b815e atl: keep libcore out of ATLTimeZone until it is needed
-d9d18822 api-impl: make the nested classes apps instantiate static
-d09b2892 api-impl: add the constructors apps call
-ae5c570e api-impl: add AccessibilityRecord and AccessibilityEvent
-2bb3f5fd graphics: add the API 29+ drawing classes as stubs
-a33bf47d api-impl: add the audio device callback API
-6ca968d0 api-impl: add Notification.CallStyle, KeyProperties and the backup helpers
-e04de078 hotspot launcher: stop the boot on the first exception
-1f8ff0f6 skia: build against the bundled libjpeg-turbo
-a08f4ce0 api-impl: add the classes view signatures name
-a4e2a120 api-impl: draw drawables that have no intrinsic size
-aea000e9 api-impl: let setImageResource(0) clear the image
-45253f2b api-impl: stop TextView applying its gravity twice
-8f8cb36e graphics: back ComposeShader with skia's blend shader
-5755b11f api-impl: draw each panel into its own layer
-```
-
-Between the last two the branch also merged atl-touch master, which is where
-the Camera1, EGL14 and audio-recording commits came from; they are not listed
-here one by one.
-
-They sit on top of atl-touch master; the commits below `087b14a5` (`fa0be5ad`
-and the desktop work before it) are the state this port started from.
-
-The branch is pushed to atl-touch
-(`git@github.com:NotKit/atl-touch.git`), which is where `build-all.sh` clones it
-from on a machine that has no atlas checkout. Keep it that way after a framework
-fix:
+A framework fix is a commit on master, pushed to atl-touch
+(`git@github.com:NotKit/atl-touch.git`), which is also where `build-all.sh` clones
+from on a machine with no atlas checkout:
 
 ```sh
 git -C linux-port/atlas commit -am "api-impl: ..."
 linux-port/build-atlas.sh && linux-port/run.sh --seconds 25
-git -C linux-port/atlas push origin mercurygram/openjdk-port
+git -C linux-port/atlas push origin HEAD:master
 ```
+
+The push is `HEAD:master` because the local branch here is `mercurygram/master`
+(see "atlas source checkout" above). The old port branch is kept on the remote as
+`mercurygram/openjdk-port` for history; nothing builds from it any more.

@@ -18,7 +18,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
 ATLAS_URL="${ATLAS_URL:-git@github.com:NotKit/atl-touch.git}"
-ATLAS_BRANCH="${ATLAS_BRANCH:-mercurygram/openjdk-port}"
+ATLAS_BRANCH="${ATLAS_BRANCH:-master}"
 
 # name | what it does
 STEPS=(
