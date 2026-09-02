@@ -91,6 +91,13 @@ jar_count=$(find "$HOST_OUT/classpath" -name '*.jar' | wc -l)
 	exit 1
 }
 
+# The SDK carries every artifact the port builds atlas for. When
+# stage-prebuilt.sh staged those, the framework is not compiled here at all --
+# and neither the headers nor ART's boot jars are needed, so the build-time
+# sysroot below shrinks to the runtime libraries the click ships.
+ATLAS_PREBUILT=""
+[ -f "$PREBUILT/atlas/api-impl.jar" ] && ATLAS_PREBUILT="$PREBUILT/atlas"
+
 [ -f "$PORT_TARGET_JAVA_HOME/lib/server/libjvm.so" ] || {
 	echo "no arm64 JVM at $PORT_TARGET_JAVA_HOME (openjdk-21-jdk-headless:arm64)" >&2
 	exit 1
@@ -102,6 +109,11 @@ if ! stamp "prefix-$(sha256sum "$PREBUILT/PROVENANCE.md" | cut -c1-12)"; then
 	log "staging the build-time sysroot in $PREFIX"
 	mkdir -p "$PREFIX"
 	rsync -a --delete-after "$PREBUILT/usr/" "$PREFIX/"
+
+	# The rest of this only exists so atlas can be compiled: the linker stubs,
+	# dx, and the two .pc files meson resolves. A prebuilt atlas needs none of
+	# it, and stage-prebuilt.sh did not stage the inputs either.
+	if [ -z "$ATLAS_PREBUILT" ]; then
 
 	# art-standalone.pc puts -lart -lnativebridge on every link line that uses
 	# it. Nothing in this port calls into either (the framework's DT_NEEDED are
@@ -142,14 +154,22 @@ Version: 3.4
 Libs: -L\${libdir} -lglfw
 Cflags: -I\${includedir}
 EOF
+	fi
 	done_stamp "prefix-$(sha256sum "$PREBUILT/PROVENANCE.md" | cut -c1-12)"
 fi
 
 # --- 3. atlas: framework natives, api-impl.jar and the HotSpot launcher -----
 
 # Before libtmessages: its CMake finds atlas's libandroid.so.0 at link time.
-log "atlas (arm64, prebuilt skia)"
-"$ROOT/linux-port/build-atlas.sh"
+if [ -n "$ATLAS_PREBUILT" ]; then
+	# Same layout build-atlas.sh installs, so everything downstream is unchanged.
+	log "atlas (prebuilt, from the ATL SDK)"
+	mkdir -p "$ATLAS_OUT"
+	rsync -a "$ATLAS_PREBUILT/" "$ATLAS_OUT/"
+else
+	log "atlas (arm64, prebuilt skia)"
+	"$ROOT/linux-port/build-atlas.sh"
+fi
 
 # --- 3b. the compat shim ----------------------------------------------------
 

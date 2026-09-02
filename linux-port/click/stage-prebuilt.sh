@@ -57,8 +57,10 @@ if [ -n "$ATL_SDK_TAG" ] && [ "$ATL_SDK_TAG" != off ] && [ "$ATL_SDK_TAG" != non
 		echo "no atlas checkout to derive an SDK tag from; using $ATL_PREBUILT"
 	else
 		dl="$PORT_OUT/downloads"; mkdir -p "$dl"
-		archive="$dl/atl-sdk-$PORT_ARCH-$sdk_tag.tar.zst"
-		url="https://github.com/$ATL_SDK_REPO/releases/download/$sdk_tag/atl-sdk-$PORT_ARCH.tar.zst"
+		# arm64 unconditionally: this stages the click's inputs, and the click
+		# is arm64-only. $PORT_ARCH here is the host's, which is not the same.
+		archive="$dl/atl-sdk-arm64-$sdk_tag.tar.zst"
+		url="https://github.com/$ATL_SDK_REPO/releases/download/$sdk_tag/atl-sdk-arm64.tar.zst"
 		if [ ! -f "$archive" ] && ! curl -Lf --retry 3 -o "$archive.tmp" "$url"; then
 			rm -f "$archive.tmp"
 			[ -z "$forced" ] || { echo "SDK $sdk_tag not downloadable: $url" >&2; exit 1; }
@@ -75,15 +77,14 @@ if [ -n "$ATL_SDK_TAG" ] && [ "$ATL_SDK_TAG" != off ] && [ "$ATL_SDK_TAG" != non
 			SDK_DIR="$PORT_OUT/atl-sdk/$sdk_tag"
 			rm -rf "$SDK_DIR"; mkdir -p "$SDK_DIR"
 			zstd -dc "$archive" | tar -C "$SDK_DIR" -x
-			# An SDK from before the headers were packaged cannot serve this
-			# build; say so rather than failing later inside meson.
-			if [ ! -d "$SDK_DIR/usr/include/androidfw" ] || [ ! -d "$SDK_DIR/usr/include/skia/include" ]; then
+			# What matters is the atlas artifacts, not headers: with the SDK
+			# the framework is taken prebuilt and never compiled here.
+			if [ ! -f "$SDK_DIR/usr/lib/java/api-impl_classes.jar" ]; then
 				[ -z "$forced" ] || {
-					echo "SDK $sdk_tag has no include/ tree: it predates" >&2
-					echo "atl-touch's 'ci: ship the headers a source consumer needs'" >&2
+					echo "SDK $sdk_tag has no usr/lib/java/api-impl_classes.jar" >&2
 					exit 1
 				}
-				echo "SDK $sdk_tag has no include/ tree (predates the headers change); using $ATL_PREBUILT"
+				echo "SDK $sdk_tag carries no framework jar; using $ATL_PREBUILT"
 				SDK_DIR=""
 			fi
 		fi
@@ -113,42 +114,84 @@ if [ -f "$OUT/PROVENANCE.md" ] && [ "$force" = 0 ]; then
 	exit 0
 fi
 
-for f in "$SRC_STAGE/lib/art/libandroidfw.so" "$SRC_STAGE/lib/java/core-all_classes.jar" \
-         "$SRC_STAGE/lib/libglfw.so.3" "$SRC_SKIA_LIB" "$SRC_SKIA_INC/core/SkCanvas.h"; do
-	[ -e "$f" ] || {
-		echo "missing prebuilt input: $f" >&2
-		echo "set UT_ATL_PREBUILT to an arm64 ART packaging build tree (see README.md)" >&2
-		exit 1
-	}
-done
-
 # Everything under lib/art that libandroidfw needs at runtime, and nothing else:
-# no libart.so (240 MB), which this port never loads — build.sh stubs the two
-# names art-standalone.pc puts on the link line.
+# no libart.so (240 MB), which this port never loads.
 art_libs=(libandroidfw.so libbase.so libcutils.so liblog.so libutils.so libziparchive.so)
 
 rm -rf "$OUT"
-mkdir -p "$OUT/usr/lib/art" "$OUT/usr/lib/java" "$OUT/usr/include" "$OUT/skia"
+mkdir -p "$OUT/usr/lib/art"
 
+for f in "$SRC_STAGE/lib/art/libandroidfw.so" "$SRC_STAGE/lib/libglfw.so.3"; do
+	[ -e "$f" ] || { echo "missing prebuilt input: $f" >&2; exit 1; }
+done
 for lib in "${art_libs[@]}"; do
 	cp "$SRC_STAGE/lib/art/$lib" "$OUT/usr/lib/art/$lib"
 done
-cp "$SRC_STAGE"/lib/java/*.jar "$OUT/usr/lib/java/"
-# atlas's meson resolves `dx` at configure time (it dexes api-impl.jar for ART).
-# The port never runs those targets, but configure fails without the program —
-# and dx is a shell wrapper around dx.jar, so it costs nothing to carry.
-mkdir -p "$OUT/usr/bin"
-cp "$SRC_STAGE/bin/dx" "$OUT/usr/bin/dx"
-cp -a "$SRC_STAGE"/lib/lib{c,dl,pthread,stdc++}_bio.so* "$OUT/usr/lib/"
 cp -a "$SRC_STAGE"/lib/libglfw.so* "$OUT/usr/lib/"
-cp -a "$SRC_STAGE/include/androidfw" "$SRC_STAGE/include/GLFW" "$OUT/usr/include/"
 
-cp "$SRC_SKIA_LIB" "$OUT/skia/libskia.so"
-# include/ plus modules/: atlas only includes headers under include/, but those
-# reach into modules/ themselves (SkColorSpace.h -> modules/skcms/skcms.h). The
-# rest of the 8 GB checkout is sources and test data.
-cp -a "$SRC_SKIA_INC" "$OUT/skia/include"
-cp -a "$SRC_SKIA_MODULES" "$OUT/skia/modules"
+if [ -n "$SDK_DIR" ] && [ -n "${PORT_ATLAS_PREBUILT:-}" ]; then
+	# --- prebuilt atlas -------------------------------------------------
+	# Off by default, and not because it does not work: the published SDK is
+	# built in the ubuntu-touch-24.04-2.x container, where content-hub's glib
+	# binding is still libcontent-hub-glib.so.1. This click is 24.04-1.x, whose
+	# container and devices only have it under the lomiri name, so the SDK's
+	# libtranslation_layer_main.so names a library no phone here can resolve and
+	# click/build.sh rejects the tree. Needs an SDK built for 1.x (an atl-touch
+	# CI matrix entry) before this can be the default.
+	# The SDK carries every artifact the port builds atlas for, so the click
+	# does not compile the framework at all. That drops everything the
+	# framework build needed and the app does not: the androidfw/GLFW/skia
+	# headers, ART's boot jars (javac's -bootclasspath for api-impl), dx, and
+	# the bionic stubs -- only libart.so ever needed those, and nothing here
+	# loads it.
+	#
+	# Laid out exactly as build-atlas.sh installs $ATLAS_OUT, so click/build.sh
+	# consumes it without knowing which way it was produced.
+	atlas_natives="$SDK_DIR/usr/lib/java/dex/android_translation_layer"
+	for f in "$SDK_DIR/usr/lib/java/api-impl_classes.jar" \
+	         "$atlas_natives/natives/libtranslation_layer_main.so" \
+	         "$SDK_DIR/usr/bin/android-translation-layer-hotspot" \
+	         "$SDK_DIR/usr/lib/libandroid.so.0" "$SDK_DIR/usr/lib/libskia.so"; do
+		[ -e "$f" ] || { echo "SDK is missing $f" >&2; exit 1; }
+	done
+
+	mkdir -p "$OUT/atlas/system/etc" "$OUT/atlas/system/fonts"
+	cp "$SDK_DIR/usr/lib/java/api-impl_classes.jar" "$OUT/atlas/api-impl.jar"
+	cp "$atlas_natives/framework-res.apk" "$OUT/atlas/framework-res.apk"
+	cp "$atlas_natives/natives/libtranslation_layer_main.so" "$OUT/atlas/"
+	cp "$SDK_DIR/usr/bin/android-translation-layer-hotspot" "$OUT/atlas/"
+	cp "$SDK_DIR/usr/lib/libandroid.so.0" "$SDK_DIR/usr/lib/libskia.so" "$OUT/atlas/"
+	ln -sfn libandroid.so.0 "$OUT/atlas/libandroid.so"
+	cp "$SDK_DIR/usr/share/atl/system/etc/fonts.xml" "$OUT/atlas/system/etc/"
+	cp "$SDK_DIR/usr/share/atl/system/fonts"/*.ttf \
+	   "$SDK_DIR/usr/share/atl/system/fonts/NOTICE" "$OUT/atlas/system/fonts/"
+else
+	# --- atlas is built from source ---------------------------------------
+	# Then the framework build's own inputs have to be staged too.
+	for f in "$SRC_STAGE/lib/java/core-all_classes.jar" "$SRC_SKIA_LIB" \
+	         "$SRC_SKIA_INC/core/SkCanvas.h"; do
+		[ -e "$f" ] || {
+			echo "missing prebuilt input: $f" >&2
+			echo "set UT_ATL_PREBUILT to an arm64 ART packaging build tree (see README.md)" >&2
+			exit 1
+		}
+	done
+	mkdir -p "$OUT/usr/lib/java" "$OUT/usr/include" "$OUT/usr/bin" "$OUT/skia"
+	cp "$SRC_STAGE"/lib/java/*.jar "$OUT/usr/lib/java/"
+	# atlas's meson resolves `dx` at configure time (it dexes api-impl.jar for
+	# ART). The port never runs those targets, but configure fails without the
+	# program — and dx is a shell wrapper around dx.jar, so it costs nothing.
+	cp "$SRC_STAGE/bin/dx" "$OUT/usr/bin/dx"
+	cp -a "$SRC_STAGE"/lib/lib{c,dl,pthread,stdc++}_bio.so* "$OUT/usr/lib/"
+	cp -a "$SRC_STAGE/include/androidfw" "$SRC_STAGE/include/GLFW" "$OUT/usr/include/"
+
+	cp "$SRC_SKIA_LIB" "$OUT/skia/libskia.so"
+	# include/ plus modules/: atlas only includes headers under include/, but
+	# those reach into modules/ themselves (SkColorSpace.h -> modules/skcms/
+	# skcms.h). The rest of the 8 GB checkout is sources and test data.
+	cp -a "$SRC_SKIA_INC" "$OUT/skia/include"
+	cp -a "$SRC_SKIA_MODULES" "$OUT/skia/modules"
+fi
 
 if [ -n "$SDK_DIR" ]; then
 	art_rev=$(sed -n 's/.*"art_standalone": *"\([^"]*\)".*/\1/p' "$SDK_DIR/meta/sdk-manifest.json" 2>/dev/null || echo unknown)
