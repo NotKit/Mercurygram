@@ -4095,9 +4095,11 @@ is 4-6% -- but the search turned up a real gap.
 - **Idle is fine; interaction is what costs.** An 11-minute sample showed ~67%
   CPU for the first 8 minutes and 5-8% after. That looked like a startup task
   completing, but the log had 10 touch events in it: somebody was using the
-  phone. A clean sample, counting touches per window alongside CPU, is a flat
-  4-6% with zero touches. Always count interaction in the same window as CPU on a
-  device that is somebody's daily phone, or the curve means nothing.
+  phone. Sampling again with touches counted per window alongside CPU separates
+  the two cleanly: thirteen windows of 4-7% at zero touches, then 53% at 76
+  touches and 97% at 152, then back down. Always count interaction in the same
+  window as CPU on a device that is somebody's daily phone, or the curve means
+  nothing. (That 97% while scrolling is a separate question, unmeasured here.)
 - **`onPause` and `onStop` are never delivered for a compositor focus change.**
   In a 14-minute run: one `app paused = false`, two `onResume`, zero `onPause`,
   zero `onStop`, zero `hasFocus: false`. Telegram's `mainInterfacePaused` stays
