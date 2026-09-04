@@ -4039,3 +4039,80 @@ minikin so every character the primary face lacks reports identical `.notdef`
 bounds, and the grey pill where a contact-name emoji belongs is Telegram's own
 sprite path (`Emoji.java:382` draws it when `emojiBmp` is still null), not font
 fallback.
+
+## Adding a second account, and the loop the fix for it uncovered
+
+The add-account screen hung on the oneplus11: the number was accepted, the
+confirmation dialog appeared, and nothing was ever sent. Two framework gaps, one
+behind the other, and fixing the first one made the second one visible.
+
+- **The hang was `PhoneNumberUtils.compare`.** `LoginActivity.onNextPressed`
+  (line 3059) checks the typed number against every activated account before it
+  requests a code. api-impl's `PhoneNumberUtils` had `isNonSeparator`,
+  `isGlobalPhoneNumber` and `stripSeparators` and nothing else, so the call threw
+  `NoSuchMethodError` on the first loop iteration and `auth.sendCode` was never
+  reached. The whole 19k-line journal has no `sendCode` in it. Implemented in
+  atlas as AOSP's loose comparison: the last 7 dialable characters must agree and
+  what precedes them may only be an international or trunk prefix.
+- **`WindowManager.LayoutParams.preferredRefreshRate` was missing too**, and
+  `AndroidUtilities.setPreferredMaxRefreshRate` writes it from
+  `LaunchActivity.onConfigurationChanged`. The `NoSuchFieldError` fired on every
+  configuration change -- about 80 times in that session -- and aborted the rest
+  of the handler each time.
+- **Adding the field was what started the spin.** The throw had been an
+  accidental circuit breaker: it aborted `onConfigurationChanged` *before*
+  `setPreferredMaxRefreshRate` reached `wm.updateViewLayout`. With the field
+  present the call went through, and `updateViewLayout` -> `setLayoutParams` ->
+  `requestLayout` -> `nativeRequestLayout` zeroed `layout_width/height`, which
+  `atl_window_render_inner` reads as "the window was resized" and answers with
+  `dispatchConfigurationChanged`. 5838 `onConfigurationChanged` and 5838
+  `updateViewLayout`, strictly alternating, at 67% CPU. The confirmation dialog
+  was not being dismissed -- the window was being relaid out faster than it could
+  be drawn.
+- **A layout request is not a configuration change.** That is the actual defect,
+  and it predates the field: any app calling `requestLayout()` from
+  `onConfigurationChanged` would have spun. AOSP's `ViewRootImpl.requestLayout`
+  only raises `mLayoutRequested`; it never touches the window size. And AOSP's
+  `updateConfiguration` calls `requestLayout()` *immediately after* dispatching,
+  which is safe there precisely because the two are never conflated. atlas now
+  keeps them apart with a `needs_layout` flag, and `ViewRootImpl` diffs against
+  the last dispatched Configuration the way AOSP diffs
+  `mLastConfigurationFromResources`.
+- **The IME inset moved to the same flag.** It used the same zeroing trick to
+  force a relayout. `Configuration.keyboardHidden` says whether a keyboard is
+  *available*, not whether the IME is up, so AOSP routes inset changes through
+  `dispatchApplyInsets` and never a configuration change.
+- **A green run hides this.** Both `run.sh` runs printed "no uncaught exceptions"
+  -- the loop is not an exception. Measure it: `GRID_UNIT_PX=21 ./run.sh
+  --seconds 25 --fresh` then `grep -c onConfigurationChanged out/run.log`. 2512
+  without the fix, 1 with it; on the pixel9 click, 1 across three samples.
+
+## The app is never told it went to the background
+
+Chasing what looked like residual CPU on the pixel9. It was not residual -- idle
+is 4-6% -- but the search turned up a real gap.
+
+- **Idle is fine; interaction is what costs.** An 11-minute sample showed ~67%
+  CPU for the first 8 minutes and 5-8% after. That looked like a startup task
+  completing, but the log had 10 touch events in it: somebody was using the
+  phone. A clean sample, counting touches per window alongside CPU, is a flat
+  4-6% with zero touches. Always count interaction in the same window as CPU on a
+  device that is somebody's daily phone, or the curve means nothing.
+- **`onPause` and `onStop` are never delivered for a compositor focus change.**
+  In a 14-minute run: one `app paused = false`, two `onResume`, zero `onPause`,
+  zero `onStop`, zero `hasFocus: false`. Telegram's `mainInterfacePaused` stays
+  false for the life of the process, so it keeps behaving as the foreground app.
+- **The plumbing exists but is wired to the wrong thing.**
+  `activity_unfocus` in `app/android_app_Activity.c` does the right sequence
+  (`performPause`, `performStop`, `onWindowFocusChanged(false)`), and it is called
+  from exactly two places: `activity_update_current` and `activity_start` -- both
+  transitions *within* atlas's own activity stack. Nothing connects it to the
+  window losing focus.
+- **The compositor's signal does arrive**, and stops one layer short.
+  `glfwSetWindowFocusCallback` -> `on_window_focus` -> `atl_window_notify_focus`
+  -> `ViewRootImpl.dispatchWindowFocusChanged`. That is view-level focus only; it
+  never reaches the activity lifecycle.
+- **Not yet measured under backgrounding.** The app held focus for the whole
+  sample, so what is proven is the code path and the absent callbacks, not the
+  cost. The test is to switch away and watch whether CPU and the chat-list
+  updates continue.
