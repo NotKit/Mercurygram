@@ -4285,3 +4285,54 @@ Still open: **video**. The camera opens on the device and preview starts
 reach webrtc — `CameraStatistics: Camera fps: 0`. The hybris backend's frame
 delivery has never been verified on a device; the gst backend that the headless
 check covers is a different path.
+
+### Video: the camera, and then the two things that made it visible
+
+Video calls work on the oneplus11 as of 2026-09-05 — the far end sees the
+camera, and so does the local self-view. Three fixes, all in atlas, and the
+first two only showed on a device.
+
+- **The hybris HAL was never given a preview target.** The only call to
+  `android_camera_set_preview_texture` sat behind `updateTexImage()`, which
+  webrtc calls only after an `onFrameAvailable` — and no frames are produced
+  until the HAL has a target. A closed loop, and every step reported success:
+  `startPreview` on a HAL3 device with no preview window parks in
+  `WAITING_FOR_PREVIEW_WINDOW` and returns OK. So: camera opened, preview
+  "started", `Camera fps: 0`, no error anywhere. `setPreviewTexture` now arms
+  the target immediately. The same gap affects any app that only calls
+  `setPreviewDisplay()` — `camera_preview.c` hands the HAL no target either.
+- **`GL_TEXTURE_EXTERNAL_OES` was rewritten to `GL_TEXTURE_2D`.**
+  `android_opengl_GLES20.c` had a `texture_target()` helper doing that in
+  `glBindTexture` and every `glTexParameter*`. Camera frames are external
+  textures and every video shader samples them with `samplerExternalOES`, which
+  reads the unit's *external* binding — which nothing had ever bound. It
+  sampled (0,0,0,1), so the self-view drew black while being fully alive:
+  frames delivered, drawn, read back, composited, `onFirstFrameRendered` fired.
+  **Outgoing video worked by accident**: libhybris' `GLConsumer` leaves the
+  camera image on the external target of the capture context, and webrtc's
+  `YuvConverter` runs in that same context, so the encoder picked up an image
+  nobody had bound. The renderers run in other contexts and got nothing.
+- **A frame was announced twice.** Both the texture callback and the NV21
+  preview callback posted `onFrameAvailable`, so webrtc called
+  `updateTexImage()` with nothing queued; GLConsumer's no-buffer path binds
+  without checking, and the `GL_INVALID_OPERATION` surfaced later as
+  `glBindFramebuffer: GLES20 error: 1282` at `YuvConverter`'s first error check,
+  1-3 times a second. Each one also emitted one garbage I420 frame. The NV21
+  path is now skipped while a producer owns the texture.
+
+Two lessons worth carrying: **a GL name belongs to the first target it is bound
+on**, so rewriting a target is not a compatibility shim, it is a different
+object; and **the encoder and the renderers do not share a GL context**, so
+"the far end sees it" says nothing about what the local views can sample.
+
+Known and not fixed: once the self-view floats, the readback is clipped to
+`MIN(setDefaultBufferSize, pbuffer)` — the bottom-left corner of a full-screen
+render stretched into a small view, i.e. a zoomed crop. The pbuffer cannot be
+resized after creation. Clipping to the producer's `GL_VIEWPORT` at swap time
+instead of the view size would fix it for both a viewport-moving producer and a
+full-surface one like `EglRenderer`.
+
+Also noted, not changed: atlas links `dependency('gl')` and includes `<GL/gl.h>`
+while targeting ES, and the launcher asks GLFW for desktop GL 2.1 before
+falling back. It works only because libglvnd routes per-thread to the hybris ES
+driver on the device. `glesv2` is the honest dependency.

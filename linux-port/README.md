@@ -639,13 +639,14 @@ size, which is every emoji cell).
 Parity with the ART/ATL desktop status is the bar: login, chat list, text
 messages, emoji panel. What is knowingly missing:
 
-- **Voice calls work; video does not.** A call placed from the port and
-  answered on Telegram Desktop carries audio both ways on the device
-  (BRINGUP_NOTES.md for the five things that stood in the way). The camera
-  opens and starts a preview but delivers no frames to webrtc, so a video call
-  has no picture to send. Conference calls cannot work at all: the `tde2e`
-  bridge is a stub. `whisper` transcription is not built either — its JNI
-  methods raise `UnsatisfiedLinkError` if something reaches them.
+- **Voice and video calls work on the device.** Placed from the port and
+  answered on Telegram Desktop: audio both ways, the far end sees the camera,
+  and so does the local self-view. BRINGUP_NOTES.md has the eight fixes that
+  took, none of which looked like what they were. The self-view is a zoomed
+  crop once it shrinks to a corner (an EGL surface for a SurfaceTexture cannot
+  be resized). Conference calls cannot work at all: the `tde2e` bridge is a
+  stub. `whisper` transcription is not built either — its JNI methods raise
+  `UnsatisfiedLinkError` if something reaches them.
 - **No hardware codecs, and no Bluetooth or headset routing.** atlas reports no
   codec colour formats, so webrtc uses its own software ones; and
   `BluetoothAdapter.getDefaultAdapter()` returns null, so a call plays through

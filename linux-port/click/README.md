@@ -198,8 +198,9 @@ Beyond everything in `../README.md` under "Known limitations":
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
   same code crashes in skia and `run.sh` forces CPU raster.
   `MERCURYGRAM_NO_GPU=1` switches back if a device disagrees.
-- **Voice calls work on the device.** Placed from the click on the oneplus11 and
-  answered on Telegram Desktop: audio both ways. Audio goes through atlas's ALSA
+- **Voice and video calls work on the device.** Placed from the click on the
+  oneplus11 and answered on Telegram Desktop: audio both ways, camera both
+  ways. Audio goes through atlas's ALSA
   `default`, which here is the PulseAudio plugin in front of the droid card.
   Conference calls cannot work, because the tde2e bridge is a stub, and a video
   call has no picture: the camera opens but delivers no frames (below).
@@ -208,10 +209,11 @@ Beyond everything in `../README.md` under "Known limitations":
   `PORT_ATLAS_PREBUILT=0` *and* an explicit `ATL_SDK_TAG` — see BRINGUP_NOTES.md.
 - **No round video messages.** `InstantCameraView` wants a MediaCodec *encoder*
   (`createEncoderByType`, `COLOR_FormatSurface`); atlas can only decode.
-- **Camera1 opens on the device but delivers no frames.** `Camera hybris:
-  preview started (1280x720 @ 30000/1000 fps)` and then
-  `CameraStatistics: Camera fps: 0` — which is why a video call sends nothing.
-- **Camera1 is enabled but not device-verified.** `run.sh` sets
+- **Camera1 is device-verified now**, through a video call: ~45 fps from the
+  hybris backend. It needed two atlas fixes (the HAL had never been given a
+  preview target, and external textures were being rewritten to 2D) — see
+  BRINGUP_NOTES.md.
+- **Camera1 is enabled and gated.** `run.sh` sets
   `ATL_UGLY_ENABLE_CAMERA=1` and pins `ATL_CAMERA_BACKEND=hybris`, so a device
   without libhybris' `libcamera.so.1` fails loudly rather than serving
   `videotestsrc`. Retest checklist: atlas `doc/CameraDevice.md`; camera2 stays a
