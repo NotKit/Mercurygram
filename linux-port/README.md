@@ -639,15 +639,18 @@ size, which is every emoji cell).
 Parity with the ART/ATL desktop status is the bar: login, chat list, text
 messages, emoji panel. What is knowingly missing:
 
-- **Calls are built but not yet call-tested.** `jni/voip/` is compiled in and
-  the JNI bridge is live (`check-voip-instance.sh`), and atlas now starts a
-  foreground service, honours a full-screen intent and reuses a `singleTask`
-  activity, which is what `VoIPService` needs. What is unverified is a call
-  end to end. Conference calls cannot work: the `tde2e` bridge is a stub.
-  `whisper` transcription is not built either — its JNI methods raise
-  `UnsatisfiedLinkError` if something reaches them.
-- **No hardware codecs.** `MediaCodecList` is empty in atlas, so video calls
-  encode and decode in software (openh264, libvpx).
+- **Voice calls work; video does not.** A call placed from the port and
+  answered on Telegram Desktop carries audio both ways on the device
+  (BRINGUP_NOTES.md for the five things that stood in the way). The camera
+  opens and starts a preview but delivers no frames to webrtc, so a video call
+  has no picture to send. Conference calls cannot work at all: the `tde2e`
+  bridge is a stub. `whisper` transcription is not built either — its JNI
+  methods raise `UnsatisfiedLinkError` if something reaches them.
+- **No hardware codecs, and no Bluetooth or headset routing.** atlas reports no
+  codec colour formats, so webrtc uses its own software ones; and
+  `BluetoothAdapter.getDefaultAdapter()` returns null, so a call plays through
+  the earpiece or speaker only. Network handover mid-call does not fire either:
+  only the default route's interface is reported.
 - **CPU raster only.** `run.sh` exports `ATL_NO_GPU=1`: atlas's Ganesh path
   segfaults inside skia's `GrGLExtensions::init` on every GL driver on this
   machine, hardware and llvmpipe alike. `--gpu` reproduces it.

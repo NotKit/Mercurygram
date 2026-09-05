@@ -198,14 +198,19 @@ Beyond everything in `../README.md` under "Known limitations":
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
   same code crashes in skia and `run.sh` forces CPU raster.
   `MERCURYGRAM_NO_GPU=1` switches back if a device disagrees.
-- **Calls are built but not call-tested.** `jni/voip/` is compiled in for arm64
-  (as on the desktop) and the app runs with it, but no call has been placed end
-  to end — that needs a second party. Audio routing is verified: atlas opens
-  ALSA `default`, which on Ubuntu Touch is the PulseAudio plugin in front of the
-  droid card, and capture and playback both work on the oneplus11. Conference
-  calls cannot work, because the tde2e bridge is a stub.
+- **Voice calls work on the device.** Placed from the click on the oneplus11 and
+  answered on Telegram Desktop: audio both ways. Audio goes through atlas's ALSA
+  `default`, which here is the PulseAudio plugin in front of the droid card.
+  Conference calls cannot work, because the tde2e bridge is a stub, and a video
+  call has no picture: the camera opens but delivers no frames (below).
+- **A framework fix does not reach this click by default.** It takes atlas
+  prebuilt from the pinned SDK, so building one from source needs
+  `PORT_ATLAS_PREBUILT=0` *and* an explicit `ATL_SDK_TAG` — see BRINGUP_NOTES.md.
 - **No round video messages.** `InstantCameraView` wants a MediaCodec *encoder*
   (`createEncoderByType`, `COLOR_FormatSurface`); atlas can only decode.
+- **Camera1 opens on the device but delivers no frames.** `Camera hybris:
+  preview started (1280x720 @ 30000/1000 fps)` and then
+  `CameraStatistics: Camera fps: 0` — which is why a video call sends nothing.
 - **Camera1 is enabled but not device-verified.** `run.sh` sets
   `ATL_UGLY_ENABLE_CAMERA=1` and pins `ATL_CAMERA_BACKEND=hybris`, so a device
   without libhybris' `libcamera.so.1` fails loudly rather than serving

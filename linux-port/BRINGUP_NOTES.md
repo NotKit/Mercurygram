@@ -4230,3 +4230,58 @@ PORT_ATLAS_PREBUILT=0 ATL_SDK_TAG=$(cat linux-port/click/atl-sdk.tag) \
 
 Letting it fall back to the sibling ART packaging tree instead works, but that
 tree's `libskia.so` is the one with the sampled-JPEG-decode segfault.
+
+### Getting a call to actually connect on the phone
+
+Voice calls work end to end on the oneplus11 as of 2026-09-05: audio both ways,
+placed from the port and answered on Telegram Desktop. Five things stood
+between "the voip stack is built" and that, and only the first was found
+without a device.
+
+- **A missing framework method killed the call service before it started.**
+  `AudioManager.registerMediaButtonEventReceiver` — see the section above; the
+  static checker now catches this class of gap.
+- **`CodecCapabilities.colorFormats` was declared and never assigned.** webrtc
+  enumerates video decoders when the call connects and iterates that array
+  without a null check. The NullPointerException did not surface as one:
+  webrtc's generated JNI glue does `RTC_CHECK(!env->ExceptionCheck())` after
+  every call into Java (`jni_generator_helper.h`), so a pending Java exception
+  aborts the process. **Anything atlas hands webrtc must not throw**, because
+  the failure mode is SIGABRT with the Java stack trace far above it in the log.
+- **libtmessages exported its statically linked opus, and GStreamer bound to
+  it.** atlas plays call sounds through MediaPlayer/SoundPool, which scans the
+  GStreamer plugin registry inside this process; libgstopus's `opus_*` resolved
+  to the copy in libtmessages, a different build with different struct sizes,
+  and the scan died with "double free or corruption". A version script
+  (`native/libtmessages.map`) takes the exports from 2151 to 361. Worth
+  remembering generally: this process hosts GStreamer, so anything the app
+  links statically and exports can be captured by a plugin.
+- **webrtc drops every interface without `IFF_RUNNING`, which no Halium kernel
+  sets.** wlan0 on the oneplus11 carries the connection and reports flags
+  0x1003 — up, broadcast, multicast, never running. `rtc_base/ifaddrs_android.cc`
+  exists only because bionic had no `getifaddrs`; the port replaces it with
+  `native/stubs/ifaddrs_port.cc`, which uses glibc's and treats "up, and has an
+  address" as running.
+- **and then webrtc still had only loopback**, because it also filters on what
+  the *Android network monitor* knows: `ConnectivityManager.getLinkProperties`
+  returned null, `NetworkMonitorAutoDetect.networkToInfo` reads that as
+  "Detected unknown network" and drops it, and `basic_port_allocator` then says
+  "Machine has no networks; no ports will be allocated". atlas now reports the
+  interface holding the default route and its addresses.
+
+The signature of that last pair is worth knowing: the call sets up completely —
+ICE parameters exchanged, DTLS complete, audio device playing — and then dies
+after ~20 seconds with nothing but `callFailed`. Read
+`basic_port_allocator.cc`'s "Count of networks" line before anything else.
+
+- **`Service.stopSelf()` was a no-op**, so `VoIPService` never saw `onDestroy`
+  and never cleared its static instance. Telegram shows its "return to call"
+  bar on exactly that, so the bar stayed after a call ended; and after a failed
+  call `onStateUpdated(STATE_FAILED)` → `callFailed()` → `dispatchStateChanged`
+  ran once a second for the life of the app.
+
+Still open: **video**. The camera opens on the device and preview starts
+(`Camera hybris: preview started (1280x720 @ 30000/1000 fps)`), but no frames
+reach webrtc — `CameraStatistics: Camera fps: 0`. The hybris backend's frame
+delivery has never been verified on a device; the gst backend that the headless
+check covers is a different path.
