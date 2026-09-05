@@ -88,6 +88,13 @@ endforeach()
 # select.c then typedefs one that glibc already has.
 target_compile_definitions(tgcalls PRIVATE _EVENT_HAVE_FD_MASK=1)
 
+# webrtc's own getifaddrs is for bionic, and its IFF_RUNNING filter rejects
+# every interface on a Halium kernel; see native/stubs/ifaddrs_port.cc.
+get_target_property(_tgcalls_sources tgcalls SOURCES)
+list(REMOVE_ITEM _tgcalls_sources "${JNI_DIR}/voip/webrtc/rtc_base/ifaddrs_android.cc")
+list(APPEND _tgcalls_sources "${STUB_DIR}/ifaddrs_port.cc")
+set_target_properties(tgcalls PROPERTIES SOURCES "${_tgcalls_sources}")
+
 # Instance.cpp's conference-call encryptor.
 add_library(tde2e STATIC ${STUB_DIR}/tde2e_stub.cpp)
 target_include_directories(tde2e PUBLIC ${JNI_DIR}/tde2e/include)
