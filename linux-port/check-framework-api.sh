@@ -19,6 +19,7 @@ packages=("$@")
 [ ${#packages[@]} -gt 0 ] || packages=(
 	org/telegram/messenger/voip
 	org/telegram/ui/Components/voip
+	org/telegram/ui/VoIPFragment
 	org/webrtc
 )
 
@@ -33,15 +34,23 @@ rm -rf "$out"
 mkdir -p "$out/cls"
 
 # The scanner reads class files, so the app classes have to be on disk.
+# A package path matches its classes; a class path matches its nested ones too.
 patterns=()
-for p in "${packages[@]}"; do patterns+=("$p/*"); done
-unzip -q -o "$app_jar" "${patterns[@]}" -d "$out/cls"
+for p in "${packages[@]}"; do patterns+=("$p/*" "$p*.class"); done
+# unzip exits non-zero for a pattern that matches nothing, and only some of
+# these do: a package path has no *.class sibling and vice versa.
+unzip -q -o "$app_jar" "${patterns[@]}" -d "$out/cls" 2>/dev/null || true
 
 "$JAVA_HOME/bin/javac" -nowarn -d "$out" "$PORT_DIR/tools/FrameworkApiCheck.java"
 
 dirs=()
-for p in "${packages[@]}"; do [ -d "$out/cls/$p" ] && dirs+=("$out/cls/$p"); done
+for p in "${packages[@]}"; do
+	[ -d "$out/cls/$p" ] && dirs+=("$out/cls/$p")
+	[ -d "$out/cls/$(dirname "$p")" ] && dirs+=("$out/cls/$(dirname "$p")")
+done
 [ ${#dirs[@]} -gt 0 ] || { echo "no classes matched: ${packages[*]}" >&2; exit 1; }
+# A parent directory can arrive twice; the scanner would double-count.
+IFS=$'\n' read -r -d '' -a dirs < <(printf '%s\n' "${dirs[@]}" | sort -u; printf '\0')
 
 # Resolution happens against this class path, so it is the framework the port
 # actually runs: atlas plus the shim.
