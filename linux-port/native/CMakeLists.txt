@@ -506,6 +506,13 @@ target_link_libraries(${NATIVE_LIB}
 # covers it; atlas's libandroid.so.0 comes from out/atlas/ once build-atlas.sh has run,
 # with the atlas builddir as the fallback. Without this the default RPATH would
 # be the CMake build tree.
+# Only the JNI entry points are public; see native/libtmessages.map for the
+# GStreamer plugin collision that made this load-bearing. It has to be on the
+# target, not in CMAKE_SHARED_LINKER_FLAGS: that would hide the OpenSL ES
+# stub's own symbols too, and this library imports them.
+target_link_options(${NATIVE_LIB} PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_LIST_DIR}/libtmessages.map")
+
 set_target_properties(${NATIVE_LIB} PROPERTIES
         OUTPUT_NAME "tmessages.49"
         PREFIX "lib"

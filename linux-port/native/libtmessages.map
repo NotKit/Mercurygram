@@ -1,0 +1,23 @@
+/*
+ * Everything but the JNI entry points is private.
+ *
+ * The library statically links opus, libyuv, webrtc, openh264 and more, and a
+ * shared object exports all of that by default. GStreamer -- which atlas uses
+ * for MediaPlayer and SoundPool -- then scans its plugins inside this same
+ * process, and libgstopus's references to opus_* bound to the copy in here
+ * instead of the system libopus.so.0: a different build with different struct
+ * sizes, so the registry scan died with "double free or corruption" and took
+ * the app with it, in the middle of placing a call.
+ *
+ * jni/CMakeLists.txt has --exclude-libs for the same reason, but that only
+ * covers the static archives; opus and libyuv are compiled straight into the
+ * library and stay visible. Naming what is public covers both.
+ */
+{
+	global:
+		Java_*;
+		JNI_OnLoad;
+		JNI_OnUnload;
+	local:
+		*;
+};
