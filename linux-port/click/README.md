@@ -198,9 +198,12 @@ Beyond everything in `../README.md` under "Known limitations":
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
   same code crashes in skia and `run.sh` forces CPU raster.
   `MERCURYGRAM_NO_GPU=1` switches back if a device disagrees.
-- **No calls** — `jni/voip/` is not built (as on the desktop). Voice messages do
-  not need it: Telegram encodes those with its own opus code in
-  `libtmessages.so`, and the click enables the microphone gate for them.
+- **Calls are built but not call-tested.** `jni/voip/` is compiled in for arm64
+  (as on the desktop) and the app runs with it, but no call has been placed end
+  to end — that needs a second party. Audio routing is verified: atlas opens
+  ALSA `default`, which on Ubuntu Touch is the PulseAudio plugin in front of the
+  droid card, and capture and playback both work on the oneplus11. Conference
+  calls cannot work, because the tde2e bridge is a stub.
 - **No round video messages.** `InstantCameraView` wants a MediaCodec *encoder*
   (`createEncoderByType`, `COLOR_FormatSurface`); atlas can only decode.
 - **Camera1 is enabled but not device-verified.** `run.sh` sets

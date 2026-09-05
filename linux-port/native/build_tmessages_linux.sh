@@ -79,7 +79,8 @@ fi
 
 dynsyms="$($PORT_NM -D --defined-only "$PORT_OUT/$SONAME")"
 for prefix in Java_org_telegram_tgnet_ConnectionsManager_ Java_org_telegram_SQLite_ \
-              Java_org_telegram_messenger_Utilities_ JNI_OnLoad; do
+              Java_org_telegram_messenger_Utilities_ Java_org_telegram_messenger_voip_NativeInstance_ \
+              JNI_OnLoad; do
 	count="$(echo "$dynsyms" | grep -c "$prefix" || true)"
 	if [ "$count" -eq 0 ]; then
 		echo "error: no $prefix* symbols exported by $SONAME" >&2

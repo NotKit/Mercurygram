@@ -28,7 +28,7 @@ STEPS=(
 	"libvpx|libvpx (before ffmpeg: --enable-libvpx)"
 	"dav1d|dav1d"
 	"ffmpeg|ffmpeg"
-	"tmessages|the app's JNI library, glibc, no voip"
+	"tmessages|the app's JNI library, glibc, with voip"
 	"classpath|app jars and app.apk from Gradle"
 	"atlas|the atlas framework and both launchers"
 	"shim|the libcore/dalvik compat shim"

@@ -19,6 +19,9 @@
 #include <cstring>
 #include <memory>
 #include <sys/time.h>
+/* bionic's <ucontext.h> brings <signal.h> with it; glibc's does not, and
+ * webrtc's sdk/android stacktrace.cc relies on that. */
+#include <signal.h>
 
 /*
  * 2. Android types JavaVM::AttachCurrentThread's first parameter as JNIEnv**,
@@ -30,5 +33,18 @@
 #include <jni.h>
 #define AttachCurrentThread(penv, args) AttachCurrentThread((void **) (penv), (args))
 #define AttachCurrentThreadAsDaemon(penv, args) AttachCurrentThreadAsDaemon((void **) (penv), (args))
+
+/*
+ * 3. clang 21 rejects [[clang::lifetimebound]] on a parameter of a function
+ *    returning void, which webrtc's api/candidate.h has. absl defines the
+ *    macro unconditionally, so include its header first and empty the macro;
+ *    it is a lint annotation, nothing changes in the code. Targets without
+ *    webrtc on their include path skip this.
+ */
+#if __has_include(<absl/base/attributes.h>)
+#include <absl/base/attributes.h>
+#undef ABSL_ATTRIBUTE_LIFETIME_BOUND
+#define ABSL_ATTRIBUTE_LIFETIME_BOUND
+#endif
 
 #endif /* LINUX_PORT_COMPAT_HPP */

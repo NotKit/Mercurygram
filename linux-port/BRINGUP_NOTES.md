@@ -59,14 +59,14 @@ One entry per problem: symptom → cause → where it is handled.
   every `jobject` field behind `#ifdef ANDROID`. Dropping it would compile a
   tgnet with no Java integration at all. The real platform macro is
   `__ANDROID__`, which clang correctly does not define here.
-- **Excluded from the build**: `voip/` (libtgvoip, tgcalls, webrtc, rnnoise,
-  openh264, voipandroid) and breakpad per the PRD; `whisper_jni.cpp` and
+- **Excluded from the build**: breakpad per the PRD; `whisper_jni.cpp` and
   `tde2e/bridge.cpp` because `jni/whisper` and `jni/td` are not checked out;
   `cpufeatures`, an NDK module only used by the arm code. Consequence:
   `MgWhisperTranscriber` and the tde2e call-encryption natives will raise
   `UnsatisfiedLinkError` if reached — both are outside the boot-to-emoji path.
-- **`jni.c` calls `tgvoipOnJNILoad` from `JNI_OnLoad`** and it lives in the
-  excluded voip tree. `native/stubs/voip_stub.c` returns `JNI_TRUE`.
+- **`jni.c` calls `tgvoipOnJNILoad` from `JNI_OnLoad`**; with voip built that
+  is the real one, which registers libtgvoip's natives and looks up the app's
+  `AudioRecordJNI`/`AudioTrackJNI`. `native/stubs/voip_stub.c` is gone.
 - **breakpad is shimmed at the header level.** `utilities.cpp` includes
   `breakpad/src/client/linux/handler/{exception_handler,minidump_descriptor}.h`;
   `native/include/breakpad/...` provides no-op classes with the same API, so
@@ -99,10 +99,11 @@ One entry per problem: symptom → cause → where it is handled.
   declaration-only shims resolved by atlas's `libandroid.so.0`, which exports
   `AndroidBitmap_{getInfo,lockPixels,unlockPixels}` and the whole `AAsset*` API.
   `jnigraphics` therefore does not exist as a separate library here.
-- **The OpenSL ES stub is currently dead weight.** With voip excluded nothing
-  references it, but it is built (`native/stubs/opensles_stub.c`, ported from
-  mercurygram-click-packaging) and installed as
-  `out/libOpenSLES.so.1`. Voice record/playback over OpenSL stays a Non-Goal.
+- **The OpenSL ES stub is linked but never selected.** webrtc and libtgvoip
+  both build their OpenSL backends, and both pick the Java one instead: atlas
+  reports no low-latency audio feature and AAudio is compiled out, so
+  `audio_device_impl.cc` lands on `kAndroidJavaAudio`. `slCreateEngine`
+  answering "unsupported" is what keeps that honest if anything ever asks.
 - **`-Wl,--no-undefined` is added** so a missing Android symbol fails the link
   instead of surfacing as an `UnsatisfiedLinkError` in the middle of bring-up.
 - **RPATH is `$ORIGIN:$ORIGIN/atlas:$ATLAS_BUILDDIR`.** CMake would otherwise
@@ -4118,3 +4119,68 @@ is 4-6% -- but the search turned up a real gap.
   sample, so what is proven is the code path and the absent callbacks, not the
   cost. The test is to switch away and watch whether CPU and the chat-list
   updates continue.
+
+## voip: building the calls stack
+
+- **`jni/voip/CMakeLists.txt` is read and rewritten, not copied.** It is 2000
+  lines of source lists, and unlike `jni/CMakeLists.txt` it has no NDK
+  dependency beyond branching on `ANDROID_ABI`. `native/voip.cmake` reads it,
+  rewrites the `jni/`-relative paths to absolute ones and `include()`s the
+  result, so the targets, flags and definitions are exactly the Android ones and
+  cannot drift. Each deviation is one `string(REPLACE …)` with a comment.
+- **A regex over a whole file eats the newline the next match needs.** A bare
+  `voip` line and the line after it both start with `\n[ \t]+`, so consecutive
+  matches lose every second one. The rewrite doubles the newlines first and
+  halves them afterwards.
+- **`__ANDROID__` cannot be public.** `tgcalls_tp` defines it `PUBLIC` on
+  Android, where the toolchain defines it anyway; here it would push every
+  dependent target's glibc code down bionic branches. libtgvoip is the one
+  consumer that needs it — it selects `AudioInputAndroid`/`AudioOutputAndroid`,
+  the JNI classes the app ships, which is exactly the path this port wants — so
+  it gets it `PRIVATE`, with `include/sys/system_properties.h` answering the
+  property reads that come with it.
+- **`__ANDROID_API__` is a toolchain define, and code reads it.**
+  `rtc_base/event.cc` picks the bionic-only `pthread_cond_timedwait_monotonic_np`
+  below API 21. Set to 28, the level the port reports as `Build.VERSION.SDK_INT`.
+- **clang 21 rejects `[[clang::lifetimebound]]` on a void function's parameter**,
+  which `api/candidate.h` has 61 times. absl defines the macro unconditionally,
+  so `port_compat.hpp` includes `absl/base/attributes.h` and empties it — it is
+  a lint annotation, nothing generated changes.
+- **The cross build is gcc, the desktop build is clang, and the OpenSL ES
+  headers are clang-only.** `SL_API_DEPRECATED` expands to an
+  `__attribute__((availability(android,…)))` gcc does not know. Defining it away
+  has to be a compile *option*: CMake silently drops a function-style
+  `target_compile_definitions`.
+- **webrtc spells two codec headers the Android way** — `<libvpx/vp8cx.h>` and
+  `"ffmpeg/include/libavcodec/avcodec.h"`, the second being the merged directory
+  `patch_ffmpeg.sh` creates on Android and this port does not (see above).
+  `voip.cmake` builds a small include tree of symlinks pointing at the port's
+  installed prefixes rather than moving headers around.
+- **webrtc's bundled libevent has an Android `config.h` with no `fd_mask`**, so
+  `select.c` typedefs one that glibc already has. `_EVENT_HAVE_FD_MASK=1`.
+- **glibc's `<ucontext.h>` does not drag in `<signal.h>`; bionic's does**, and
+  `sdk/android/native_api/stacktrace/stacktrace.cc` relies on it. Added to
+  `port_compat.hpp`.
+- **tde2e is a stub, so conference calls cannot work.** `Instance.cpp` calls
+  `tde2e_api::call_encrypt`/`call_decrypt` for a conference call's frame
+  encryptor; `jni/td` is not checked out, so `native/stubs/tde2e_stub.cpp`
+  answers both with an error. One-to-one and group calls do not go through it.
+- **The audio layer webrtc picks is the Java one.** `audio_device_impl.cc`
+  chooses between AAudio, OpenSL and Java from what `AudioManager` reports;
+  atlas has no low-latency audio feature and AAudio is compiled out, so it lands
+  on `kAndroidJavaAudio` — the app's own `org.webrtc.voiceengine` classes over
+  atlas's `AudioRecord`/`AudioTrack`, i.e. ALSA `default`. On Ubuntu Touch that
+  is the PulseAudio plugin in front of the droid card, verified on the
+  oneplus11: `arecord -D default` and `aplay -D default` both work and show up
+  as PulseAudio streams.
+- **What atlas needed for `VoIPService` to start at all**: `startForegroundService`
+  was a `return null` stub (the app targets SDK 26+ and starts the call service
+  that way), `Notification.Builder.setFullScreenIntent` was dropped on the floor
+  (it is how an incoming call takes the screen), and `startActivity` only reused
+  a running activity when `FLAG_ACTIVITY_CLEAR_TOP` was set, ignoring
+  `launchMode` — `LaunchActivity` is `singleTask`, so every call would have
+  built a second one. All three are atlas commits on master.
+- **`android.telecom.Connection` does not exist in atlas**, so
+  `VoIPService$CallConnection` cannot link. It is only reached when
+  `USE_CONNECTION_SERVICE` is true, and that is a device whitelist the port does
+  not match, so the class is never loaded. Left alone deliberately.

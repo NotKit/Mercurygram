@@ -45,7 +45,7 @@ atlas android-translation-layer-hotspot
         |
         |  System.load from Java
         +--> libtranslation_layer_main.so  atlas natives: Skia, GLFW, libandroidfw
-        +--> out/libtmessages.so           app JNI: tgnet, sqlite, image (glibc, no voip)
+        +--> out/libtmessages.so           app JNI: tgnet, sqlite, image, voip (glibc)
         |
         v
    GLib main loop  ->  ATLWindow (GLFW + Skia)
@@ -71,6 +71,8 @@ atlas android-translation-layer-hotspot
 | `measure-startup.sh` | cold start to first frame and RSS at the chat list, HotSpot vs image, one definition (`measure-startup.py` is the harness it drives) |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
+| `check-voip-instance.sh` | proves the tgcalls/webrtc JNI bridge is live in that library |
+| `check-webrtc-audio.sh` | drives `android.media` the way webrtc's Java audio device does |
 | `check-extract-apk.sh` | proves `AssetManager.extractFromAPK` reads the apk, not the class path, and that a miss is cheap and throws nothing |
 | `check-dump-hprof.sh` | proves the framework answers `Debug.dumpHprofData`, so `org/telegram/**` carries no workaround for it |
 | `check-tlstore.sh` | instantiates every class in `TLClassStore`, the arms a driving run never takes (FR-4) |
@@ -186,11 +188,17 @@ Builds the app's JNI library for x86_64-linux-gnu from
 | --- | --- |
 | `out/libtmessages.49.so` | the library, under the name `NativeLoader` asks for |
 | `out/libtmessages.so` | symlink to the above, the name the PRD and launcher use |
-| `out/libOpenSLES.so.1` | no-op OpenSL ES stub |
+| `out/libOpenSLES.so.1` | no-op OpenSL ES stub: webrtc and libtgvoip link their OpenSL backends but never select them |
 
-Not built: `voip/` (calls), breakpad, whisper transcription and the tde2e
-bridge — the last two because their submodules are not checked out. Their JNI
-methods raise `UnsatisfiedLinkError` if reached; none are on the parity path.
+`voip/` (libtgvoip, tgcalls, webrtc, rnnoise, openh264) is built through
+`native/voip.cmake`, which rewrites `jni/voip/CMakeLists.txt` rather than
+copying its 2000 lines of source lists.
+
+Not built: breakpad, whisper transcription and the tde2e bridge — the last two
+because their submodules are not checked out. `stubs/tde2e_stub.cpp` answers
+the two calls `Instance.cpp` makes into tde2e with an error, so conference
+calls fail while one-to-one and group calls do not; whisper's JNI methods raise
+`UnsatisfiedLinkError` if reached, off the parity path.
 
 Android system libraries are replaced by `native/include/android/*.h` plus
 `native/stubs/`: logging goes to stderr (`TMESSAGES_LOG_LEVEL` raises the
@@ -630,11 +638,15 @@ size, which is every emoji cell).
 Parity with the ART/ATL desktop status is the bar: login, chat list, text
 messages, emoji panel. What is knowingly missing:
 
-- **No calls and no voice messages.** `jni/voip/` (tgcalls, webrtc, libtgvoip)
-  is not built and OpenSL ES is a no-op stub, so recording and playback do
-  nothing. Same for `whisper` transcription and the `tde2e` bridge, whose
-  submodules are not checked out — their JNI methods raise
+- **Calls are built but not yet call-tested.** `jni/voip/` is compiled in and
+  the JNI bridge is live (`check-voip-instance.sh`), and atlas now starts a
+  foreground service, honours a full-screen intent and reuses a `singleTask`
+  activity, which is what `VoIPService` needs. What is unverified is a call
+  end to end. Conference calls cannot work: the `tde2e` bridge is a stub.
+  `whisper` transcription is not built either — its JNI methods raise
   `UnsatisfiedLinkError` if something reaches them.
+- **No hardware codecs.** `MediaCodecList` is empty in atlas, so video calls
+  encode and decode in software (openh264, libvpx).
 - **CPU raster only.** `run.sh` exports `ATL_NO_GPU=1`: atlas's Ganesh path
   segfaults inside skia's `GrGLExtensions::init` on every GL driver on this
   machine, hardware and llvmpipe alike. `--gpu` reproduces it.

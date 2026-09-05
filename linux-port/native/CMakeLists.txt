@@ -5,11 +5,15 @@
 # include() of voip/CMakeLists.txt, none of which exist here. It mirrors that
 # file's targets, flags and source lists, minus what the port excludes:
 #
-#   * voip/ (libtgvoip, tgcalls, webrtc, rnnoise, openh264, voipandroid)
 #   * breakpad (header shims in include/breakpad/ keep utilities.cpp compiling)
 #   * whisper (jni/whisper submodule not checked out)
-#   * tde2e / tdutils (jni/td submodule not checked out)
+#   * tde2e / tdutils (jni/td submodule not checked out; stubs/tde2e_stub.cpp
+#     answers Instance.cpp's two calls with an error)
 #   * cpufeatures (NDK module, only used by the excluded arm code)
+#
+# voip/ (libtgvoip, tgcalls, webrtc, rnnoise, openh264, voipandroid) comes in
+# through voip.cmake, which rewrites jni/voip/CMakeLists.txt rather than
+# copying it.
 #
 # Prebuilt static deps come from $PORT_NATIVE_OUT (see native/build_*_linux.sh),
 # not from jni/<dep>/build/${ANDROID_ABI}/.
@@ -18,7 +22,7 @@
 # TMessagesProj/jni/CMakeLists.txt when that file changes.
 
 cmake_minimum_required(VERSION 3.16)
-project(tmessages_linux C CXX)
+project(tmessages_linux C CXX ASM)
 
 if (NOT DEFINED PORT_NATIVE_OUT)
     message(FATAL_ERROR "PORT_NATIVE_OUT must be set (see build_tmessages_linux.sh)")
@@ -53,7 +57,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-builtin-macro-redefined -D__FILE__=
 
 # --no-undefined turns a missing Android symbol into a link error instead of a
 # runtime UnsatisfiedLinkError halfway through bring-up.
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--build-id=none -Wl,--hash-style=gnu -Wl,-Bsymbolic -Wl,--gc-sections -Wl,--no-undefined -Wl,--exclude-libs=libtgnet.a:libflac.a:librlottie.a:libsqlite.a:libswscale.a:libavformat.a:libavcodec.a:libavresample.a:libavutil.a:libswresample.a:libvpx.a:libdav1d.a:libssl.a:libcrypto.a")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--build-id=none -Wl,--hash-style=gnu -Wl,-Bsymbolic -Wl,--gc-sections -Wl,--no-undefined -Wl,--exclude-libs=libtgvoip.a:libtgcalls.a:libtgcalls_tp.a:libopenh264.a:librnnoise.a:libtde2e.a:libtgnet.a:libflac.a:librlottie.a:libsqlite.a:libswscale.a:libavformat.a:libavcodec.a:libavresample.a:libavutil.a:libswresample.a:libvpx.a:libdav1d.a:libssl.a:libcrypto.a")
 
 #
 # Prebuilt dependencies (linux-port/native/build_*_linux.sh)
@@ -92,15 +96,14 @@ message(STATUS "atlas libandroid: ${ATLAS_LIBANDROID}")
 add_library(androidlog STATIC ${STUB_DIR}/android_log.c)
 target_include_directories(androidlog PUBLIC ${SHIM_DIR})
 
-# No-op OpenSL ES, ported from mercurygram-click-packaging/stubs. With voip/
-# excluded nothing currently references it, so --as-needed drops it from
-# DT_NEEDED; it exists so an OpenSL ES user does not fail to link. Voice
-# record/playback through OpenSL is a documented Non-Goal.
+# No-op OpenSL ES, ported from mercurygram-click-packaging/stubs. webrtc and
+# libtgvoip link their OpenSL backends but never select them: atlas reports
+# no low-latency audio feature, so both take the Java AudioRecord/AudioTrack
+# path. slCreateEngine answering "unsupported" keeps that honest.
 add_library(OpenSLES SHARED ${STUB_DIR}/opensles_stub.c)
 set_target_properties(OpenSLES PROPERTIES SOVERSION 1)
 
-# jni.c's JNI_OnLoad calls into the excluded voip tree.
-add_library(voipstub STATIC ${STUB_DIR}/voip_stub.c)
+include(${CMAKE_CURRENT_LIST_DIR}/voip.cmake)
 
 #
 # tgnet
@@ -463,13 +466,18 @@ target_include_directories(${NATIVE_LIB} PUBLIC
         # gifvideo.cpp includes two webrtc H.264 parser headers it never uses;
         # they resolve relative to jni/, their own includes need this root.
         ${JNI_DIR}/voip/webrtc
+        ${JNI_DIR}/tde2e/include
         ${PORT_NATIVE_OUT}/boringssl/include
         ${PORT_NATIVE_OUT}/ffmpeg/include
         ${PORT_NATIVE_OUT}/libvpx/include
         ${JAVA_INCLUDE_DIRS})
 
 target_link_libraries(${NATIVE_LIB}
-        voipstub
+        -Wl,--whole-archive rnnoise openh264 voipandroid -Wl,--no-whole-archive
+        tgvoip
+        tgcalls
+        tgcalls_tp
+        tde2e
         tgnet
         flac
         rlottie
