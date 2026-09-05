@@ -107,6 +107,13 @@ step_checks() {
 	# NativeLoader picks up the glibc libtmessages.so inside the real
 	# launcher. Exercises the whole stack short of the UI.
 	"$PORT_DIR/check-native-loader.sh"
+	# The calls stack: JNI_OnLoad now runs the real tgvoipOnJNILoad, and tgcalls
+	# answers for itself. Cheap, and it catches a voip build that linked but
+	# registered nothing.
+	"$PORT_DIR/check-voip-instance.sh"
+	# webrtc's Java audio device is picky about what AudioTrack/AudioRecord
+	# report; this drives them the same way, with or without a sound card.
+	"$PORT_DIR/check-webrtc-audio.sh"
 	# Apk content comes out of the apk, not the class path.
 	# Nothing in a boot reliably posts a notification, so this path needs its own
 	# check rather than a run.
