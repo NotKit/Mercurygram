@@ -4184,3 +4184,49 @@ is 4-6% -- but the search turned up a real gap.
   `VoIPService$CallConnection` cannot link. It is only reached when
   `USE_CONNECTION_SERVICE` is true, and that is a device whitelist the port does
   not match, so the class is never loaded. Left alone deliberately.
+
+### A missing framework method hides until the line runs
+
+Pressing the call button did nothing. `VoIPService.onCreate` had died on
+`NoSuchMethodError: AudioManager.registerMediaButtonEventReceiver`, two lines
+before the end of its setup block — and because a `NoSuchMethodError` is an
+`Error`, the `catch (Exception x)` wrapped around that whole block did not
+catch it. atlas's GLib dispatch then cleared the exception out of the `Handler`
+callback, so the app kept running with a half-built call service and no visible
+failure at all. `BluetoothAdapter.getProfileProxy` had failed the same way a few
+lines earlier, inside a `catch (Throwable)` that did swallow it.
+
+The existing checks could not have caught either. `PortClassCheck` and
+`ViewSignatureCheck` load classes, and a missing *class* does fail at load; a
+missing *method* resolves lazily, at the instant the call executes.
+
+`check-framework-api.sh` reads the constant pool of the app's own class files
+and resolves every `android.*`/`dalvik.*`/`libcore.*` method and field against
+atlas plus the shim. On the call stack it found 57 gaps at once — 43 reachable
+— which would otherwise have been 43 rounds of build, install, press the
+button, read the log. Fourteen are deliberately left: `android.telecom.*` is
+behind `VoIPService.USE_CONNECTION_SERVICE`, a device whitelist this port does
+not match, and the rest is screen capture and Wi-Fi Direct.
+
+Worth knowing for the next subsystem: point the script at another package
+(`check-framework-api.sh org/telegram/messenger/camera`) before bringing it up,
+not after.
+
+### The click takes atlas prebuilt, so a framework fix does not reach the phone
+
+The first calls click was built the default way, with atlas from the pinned ATL
+SDK. None of the framework fixes were in it — which is why the crash on the
+device was in code that had already been fixed here. `PORT_ATLAS_PREBUILT=0`
+builds the framework from source instead, and it still wants the SDK for what
+the container cannot produce, so pin the tag rather than letting `auto` derive
+one from the local HEAD:
+
+```sh
+PORT_ATLAS_PREBUILT=0 ATL_SDK_TAG=$(cat linux-port/click/atl-sdk.tag) \
+    linux-port/click/stage-prebuilt.sh
+PORT_ATLAS_PREBUILT=0 ATL_SDK_TAG=$(cat linux-port/click/atl-sdk.tag) \
+    clickable build --arch arm64 --skip-review
+```
+
+Letting it fall back to the sibling ART packaging tree instead works, but that
+tree's `libskia.so` is the one with the sampled-JPEG-decode segfault.

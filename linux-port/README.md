@@ -71,6 +71,7 @@ atlas android-translation-layer-hotspot
 | `measure-startup.sh` | cold start to first frame and RSS at the chat list, HotSpot vs image, one definition (`measure-startup.py` is the harness it drives) |
 | `run.sh` | runs Mercurygram on the launcher; `--seconds N` also checks the log and takes a screenshot |
 | `check-native-loader.sh` | runs `NativeLoader` inside the launcher and proves it loads the glibc `libtmessages.so` |
+| `check-framework-api.sh` | resolves every `android.*` method the call stack names against atlas |
 | `check-voip-instance.sh` | proves the tgcalls/webrtc JNI bridge is live in that library |
 | `check-webrtc-audio.sh` | drives `android.media` the way webrtc's Java audio device does |
 | `check-extract-apk.sh` | proves `AssetManager.extractFromAPK` reads the apk, not the class path, and that a miss is cheap and throws nothing |

@@ -107,6 +107,10 @@ step_checks() {
 	# NativeLoader picks up the glibc libtmessages.so inside the real
 	# launcher. Exercises the whole stack short of the UI.
 	"$PORT_DIR/check-native-loader.sh"
+	# A missing framework *method* is a NoSuchMethodError when the line runs,
+	# not at class load, so nothing else here would catch it: it killed a call
+	# halfway through VoIPService.onCreate.
+	"$PORT_DIR/check-framework-api.sh"
 	# The calls stack: JNI_OnLoad now runs the real tgvoipOnJNILoad, and tgcalls
 	# answers for itself. Cheap, and it catches a voip build that linked but
 	# registered nothing.
