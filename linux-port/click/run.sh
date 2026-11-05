@@ -128,11 +128,18 @@ if [ "${MERCURYGRAM_CDS:-auto}" != off ]; then
     [ -n "${CDSFP}" ] && printf '%s' "${CDSFP}" > "${JSA}.fp"
 fi
 
+# shim.jar goes first, and only once: with it also in a classpath/* glob, the
+# dump drops the duplicate but the runtime check does not, so CDS never maps.
+CLASSPATH_JARS="${PKG_ROOT}/classpath/shim.jar"
+for _jar in "${PKG_ROOT}"/classpath/*.jar; do
+    [ "${_jar##*/}" = shim.jar ] || CLASSPATH_JARS="${CLASSPATH_JARS}:${_jar}"
+done
+
 exec "${PKG_ROOT}/lib/android-translation-layer-hotspot" \
     --api-impl-jar "${PKG_ROOT}/atlas/api-impl.jar" \
     --framework-res "${PKG_ROOT}/atlas/framework-res.apk" \
     --natives-dir "${PKG_ROOT}/lib" \
-    --classpath "${PKG_ROOT}/classpath/shim.jar:${PKG_ROOT}/classpath/*" \
+    --classpath "${CLASSPATH_JARS}" \
     --library-path "${PKG_ROOT}/lib" \
     --launch-activity org.telegram.ui.LaunchActivity \
     -X "-Dtmessages.native.path=${PKG_ROOT}/lib/libtmessages.so" \
