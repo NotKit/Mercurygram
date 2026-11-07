@@ -20,7 +20,39 @@ on:
   workflow_dispatch:
 
 jobs:
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for the pinned ATL SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATL_SDK_TAG: ${{ vars.ATL_SDK_TAG || 'auto' }}
+        run: |
+          tag="$ATL_SDK_TAG"
+          if [ "$tag" = auto ]; then
+            tag=$(tr -d '[:space:]' < linux-port/click/atl-sdk.tag)
+          fi
+          for attempt in $(seq 1 350); do
+            ready=$(gh release view "$tag" --repo NotKit/atl-touch --json assets \
+              --jq '[.assets[].name] | (index("atl-sdk-arm64.tar.zst") != null) and (index("atl-sdk-arm64.tar.zst.sha256") != null)' \
+              2>/dev/null || true)
+            if [ "$ready" = true ]; then
+              echo "ATL SDK $tag is ready"
+              exit 0
+            fi
+            echo "Waiting for ATL SDK $tag ($attempt/350)"
+            sleep 60
+          done
+          echo "ATL SDK $tag was not published in time" >&2
+          exit 1
+
   build:
+    needs: sdk
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
