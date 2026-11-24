@@ -23,6 +23,7 @@ dependencies_host:
   - lld
   - meson
   - ninja-build
+  - ant
   - generate-ninja
   - openjdk-21-jdk-headless
   - ca-certificates-java

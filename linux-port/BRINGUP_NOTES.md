@@ -24,6 +24,61 @@ rendering. Titan2elite passes the staged flag check and accepted the install
 request, but went offline before the installed-build and startup checks.
 Logs and the rebuilt click are under `out/jvm-production/` and `out/`.
 
+## Clipboard and inactive windows (November 2026)
+
+The clipboard fix is in the `atl-touch` master checkout. The port's local
+`linux-port/atlas` worktree was still on an older `replay-test` branch without
+the content-hub bridge, so testing its output would miss the fix. The tested
+click uses a matching framework jar, native libraries and HotSpot launcher
+built from `/home/nekit/UT/atl-touch`. The pinned SDK must be updated before
+an ordinary prebuilt build includes these local framework changes.
+
+The existing ClipData/ClipDescription replacement supplies real items and MIME
+types. ClipboardManager reads the first item, and its JNI bridge converts real
+UTF-8 through UTF-16 so supplementary characters survive both directions.
+Reads ask content-hub first; an earlier rejected copy must not hide a later
+system paste. EditText now handles copy, cut, paste and select-all, including
+keyboard shortcuts and a long-press menu.
+
+The long-press menu now follows the Android reference: a compact rounded
+toolbar above the caret, with a dark or light background matching the editor.
+It uses a non-focusable PopupWindow, so the chat stays undimmed and the keyboard
+keeps its editor. ViewRootImpl must respect FLAG_NOT_FOCUSABLE when adding a
+panel; clearing focus unconditionally dismissed the toolbar as it opened.
+
+Selected text was still invisible because TextView ignored setHighlightColor
+and always drew Layout without a highlight path. It now draws the layout's
+selection path behind the glyphs, using the theme or app's highlight color.
+EditText suppresses the caret for a range selection. The widget geometry checks
+cover multiline, RTL and reversed selections, including Telegram's translated
+editor drawing, and clearing the highlight when the range collapses.
+
+ATLWindow stops drawing inactive, hidden or minimized windows and keeps their
+dirty state. One initial frame lets Wayland map a new surface. Reactivation
+forces a full redraw and resumes pending main-thread Choreographer callbacks;
+ordinary Handler work and networking continue while frames are suspended.
+`ATL_DEBUG_RENDER=1` logs transitions and frame counters.
+
+`tools/ClipboardCheck.java` checks real clipboard items, Unicode, clearing and
+editor shortcuts. `tools/FrameSchedulingCheck.java` checks that pending frame
+callbacks wait and resume once while handlers remain live. Compile them against
+the matching framework jar and run them with the launcher's `--run-class`,
+using an isolated `ANDROID_APP_DATA_DIR`. ClipboardCheck reads UTF-8 from
+`-Dcheck.text=FILE`; `-Dcheck.mode=paste` reads an external copy, `editor` tests
+editing actions, and `clear` checks clearing.
+
+The device dependency allowlist now covers both pixel9 (24.04) and titan2elite
+(26.04). Without that, the 24.04 build fails before startup on 26.04 because
+FFmpeg and ICU have newer sonames. Ant is installed in the build image so ATL
+compiles its Java sources in one batch.
+
+Both devices passed Unicode exchange with an independent content-hub client,
+editor copy/cut/paste, clearing, and the frame callback check. With the real app
+kept running for five seconds behind Settings, the suspend/resume counters
+matched: 2649 on titan2elite and 6229 on pixel9. The tested click and logs are
+under `out/mercurygram-jvm.nekit_12.9.0_arm64.click` and
+`out/device-checks-20261110/`.
+
 ## Native dependencies
 
 - **BoringSSL archives land at the top of the build tree**, not in

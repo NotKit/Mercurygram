@@ -171,6 +171,11 @@ holds the warnings, and is the place to look when start-up is slow.
 
 ## Status
 
+Clipboard and rendering suspension were checked on pixel9 (Ubuntu Touch 24.04)
+and titan2elite (26.04) in November 2026. The click bundles dependencies missing
+on either release; in particular, 26.04 no longer provides the 24.04 FFmpeg and
+ICU sonames. See `../BRINGUP_NOTES.md` for the framework source and checks.
+
 Device-verified on a OnePlus 11 running Ubuntu Touch 24.04.4: the app launches
 from the Lomiri launcher, boots to the main activity with hardware GPU
 rendering, and connects to Telegram (MTProto handshake and pings against dc2).
@@ -192,7 +197,7 @@ Beyond everything in `../README.md` under "Known limitations":
 - **310 MB installed (a 175 MB click)**, now mostly the app: `classpath/` is
   112 MB (81 MB of it `TMessagesProj.jar`) and `app.apk` another 62 MB. The
   runtime is no longer the big half — see "The bundled JVM" below. Shrinking the
-  jars means R8, which the port cannot use: it needs `debug`'s unrenamed class
+  jars means R8, which the port cannot use: it needs the `jvm` variant's unrenamed class
   names.
 - **The GPU path is the default here** and it works on the device (`GPU rendering
   (Ganesh) on Adreno (TM) 740, OpenGL ES 3.2`), unlike on the desktop, where the
