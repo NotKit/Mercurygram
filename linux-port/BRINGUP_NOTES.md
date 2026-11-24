@@ -26,12 +26,11 @@ Logs and the rebuilt click are under `out/jvm-production/` and `out/`.
 
 ## Clipboard and inactive windows (November 2026)
 
-The clipboard fix is in the `atl-touch` master checkout. The port's local
-`linux-port/atlas` worktree was still on an older `replay-test` branch without
-the content-hub bridge, so testing its output would miss the fix. The tested
-click uses a matching framework jar, native libraries and HotSpot launcher
-built from `/home/nekit/UT/atl-touch`. The pinned SDK must be updated before
-an ordinary prebuilt build includes these local framework changes.
+The clipboard and frame suspension changes are on atl-touch master since
+`cbe6f83b`, together with the 2026-11 upstream ATL imports. `atl-sdk.tag` pins
+`sdk-cbe6f83`, so an ordinary prebuilt build includes them. The November checks
+were first run on a click built from a local framework checkout; they passed
+again on pixel9 with the framework from master.
 
 The existing ClipData/ClipDescription replacement supplies real items and MIME
 types. ClipboardManager reads the first item, and its JNI bridge converts real
