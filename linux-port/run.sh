@@ -18,7 +18,7 @@
 #   --fresh       wipe the data dir first (a first-launch run)
 #   --gpu         leave ATL_NO_GPU unset (see BRINGUP_NOTES.md: Ganesh crashes
 #                 in skia's GL interface assembly, so CPU raster is the default)
-#   --tl-dump     leave FileLog's TL dumper on (off by default here, see below).
+#   --tl-dump     enable TL dumps in private debug builds; inactive in jvm builds.
 #                 Never pass it while tracing metadata.
 # Anything after -- is passed straight to the launcher.
 #
@@ -121,10 +121,8 @@ fi
 # tgnet's native lines plus the app's separate files/logs/ files.
 export ANDROID_LOG_TAGS="${ANDROID_LOG_TAGS:-*:V}"
 
-# FileLog's TL dumper serializes every request and update with Gson, which is
-# most of run.log and most of the reflection an ahead-of-time image would have to
-# declare. Off here; --tl-dump brings the JSON back for MTProto
-# debugging, and must never be used while tracing metadata.
+# Private debug builds can dump every request and update through Gson.
+# Keep that off during metadata tracing. The jvm variant disables it entirely.
 tl_dump_opts=()
 [ "$tl_dump" = 1 ] || tl_dump_opts=(-X "-Dtmessages.tldump=0")
 
@@ -292,15 +290,11 @@ uncaught=$(grep -cE '^(error: exception during|Exception in thread|uncaught exce
 	exit 1
 }
 
-# The app's own verdict. BuildVars installs an uncaught-exception handler that
-# writes FATAL and, on this DEBUG_PRIVATE_VERSION build, calls System.exit(2) --
-# which the launcher hangs in, leaving a dead JVM with its window still up. That
-# looks like a frozen app here and like nothing at all in run.log, so the check
-# is the app's log file.
+# When app logging is enabled, check its fatal-exception report too.
 mapfile -t app_logs < <(find "$data_dir" -path '*/files/logs/*.txt' -newer "$started_marker" \
 	! -name '*_net.txt' ! -name '*_mtproto.txt' 2>/dev/null)
 if [ "${#app_logs[@]}" -gt 0 ] && grep -q 'FATAL/tmessages' "${app_logs[@]}"; then
-	echo "the app hit a fatal exception (and killed itself):" >&2
+	echo "the app logged a fatal exception:" >&2
 	grep -h -A 12 'FATAL/tmessages' "${app_logs[@]}" | head -30 >&2
 	exit 1
 fi

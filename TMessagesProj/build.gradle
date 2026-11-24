@@ -224,6 +224,19 @@ android {
             buildConfigField "boolean", "BUILD_HOST_IS_WINDOWS", isWindows
             buildConfigField "int", "VERSION_NUM", "7"
         }
+
+        if (linuxPort) {
+            jvm {
+                initWith debug
+                debuggable false
+                jniDebuggable false
+                minifyEnabled false
+                shrinkResources false
+                buildConfigField "boolean", "DEBUG_VERSION", "false"
+                buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "false"
+                matchingFallbacks = ['release']
+            }
+        }
     }
 
     namespace 'org.telegram.messenger'

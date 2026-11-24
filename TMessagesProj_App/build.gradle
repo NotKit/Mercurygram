@@ -125,6 +125,18 @@ android {
             ndk.debugSymbolLevel = 'FULL'
         }
 
+        if (linuxPort) {
+            jvm {
+                // Retain the existing .beta application ID for installed sessions.
+                initWith debug
+                debuggable false
+                jniDebuggable false
+                minifyEnabled false
+                shrinkResources false
+                matchingFallbacks = ['release']
+            }
+        }
+
         standalone {
             debuggable false
             jniDebuggable false
@@ -159,6 +171,12 @@ android {
 
     sourceSets.release {
         manifest.srcFile '../TMessagesProj/config/release/AndroidManifest.xml'
+    }
+
+    if (linuxPort) {
+        sourceSets.jvm {
+            manifest.srcFile '../TMessagesProj/config/release/AndroidManifest_SDK23.xml'
+        }
     }
 
     flavorDimensions "minApi"

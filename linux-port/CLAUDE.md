@@ -41,9 +41,9 @@
   variant configurations do not exist yet). The same flag guards
   `externalNativeBuild` in the two Android modules — never let a port build
   invoke the NDK, it dirties `TMessagesProj/jni/`.
-- The port's chosen variant is `afatFdX86_64Debug`. Anything that names app
-  classes (launcher, shims, `-D` properties) depends on `debug` being the
-  build type, because `release`/`standalone` run R8 and rename them.
+- The port's chosen variant is `afatFdX86_64Jvm`. Keep it unminified so the
+  launcher, shims and reflection retain class names. DEBUG_VERSION and
+  DEBUG_PRIVATE_VERSION are false; debug menus are not a JVM requirement.
 - Verification helpers written in Java go in `tools/`, built into
   `$PORT_OUT/tools` by the script that uses them — same idea as
   `native/tools/dlopen_check.c`.
@@ -172,11 +172,9 @@
   meson only copies that into the (shared, long-extracted) skia checkout when it
   first extracts the wrap — `build-atlas.sh` re-copies it on every run so an
   atlas commit there actually takes effect.
-- The port's build is a `DEBUG_PRIVATE_VERSION`, so `FileLog.fatal` answers any
-  uncaught exception with `System.exit(2)` — and the launcher hangs in the exit,
-  leaving a dead JVM with its window still up (0% CPU, no repaints, no input).
-  "The UI froze" means "read `files/logs/*.txt` for `FATAL/tmessages`"; `run.sh`
-  fails the run on it.
+- Older private debug builds could hang in System.exit after a fatal exception.
+  The `jvm` variant disables private debug mode. Read the runtime log for
+  exceptions; `run.sh` also checks FATAL/tmessages when app logging is enabled.
 - The other freeze leaves no `FATAL` at all: a throw from a click handler is
   caught in `ViewRootImpl.dispatchTouchEvent`, and one from a `Handler` callback
   is cleared by the GLib dispatch in `android_os_MessageQueue.c`. The app keeps

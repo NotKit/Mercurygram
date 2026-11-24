@@ -68,7 +68,10 @@ done
 # directly can only resolve once build-atlas.sh adds the atlas framework jar.
 CHECK_DIR="$PORT_OUT/tools"
 mkdir -p "$CHECK_DIR"
-"$JAVA_HOME/bin/javac" -d "$CHECK_DIR" "$PORT_DIR/tools/PortClassCheck.java"
+"$JAVA_HOME/bin/javac" -d "$CHECK_DIR" \
+	"$PORT_DIR/tools/PortClassCheck.java" "$PORT_DIR/tools/PortBuildCheck.java"
+
+"$JAVA_HOME/bin/java" -cp "$CHECK_DIR:$CLASSPATH_DIR/*" PortBuildCheck
 
 "$JAVA_HOME/bin/java" -cp "$CHECK_DIR:$CLASSPATH_DIR/*" PortClassCheck \
 	org.telegram.messenger.Utilities \

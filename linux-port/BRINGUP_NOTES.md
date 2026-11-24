@@ -3,6 +3,27 @@
 Running log of workarounds, deviations from the Android build, and crash fixes.
 One entry per problem: symptom → cause → where it is handled.
 
+## JVM build without developer features
+
+The port now builds `afatFdX86_64Jvm` instead of the debug variant. The `jvm`
+build type exists only with `-PlinuxPort` in both app and library modules. It
+keeps unminified classes and resources, disables debuggability, DEBUG_VERSION
+and DEBUG_PRIVATE_VERSION, and uses the production manifest. The existing
+`.beta` application ID is retained so installed sessions keep their identity.
+
+The debug variant had been chosen for stable class names, but it also exposed
+Dump Canvas and the test-backend controls. The JVM variant keeps class names
+stable without those developer flags.
+`build-classpath.sh` runs `PortBuildCheck` against the actual output jars to
+reject debug flags, a wrong variant, or an application ID change. The debug
+variant references later in these notes describe the older bring-up builds.
+
+The full and incremental builds pass the flag check and all 11 class checks.
+The installed click passes on pixel9 and starts its main activity with GPU
+rendering. Titan2elite passes the staged flag check and accepted the install
+request, but went offline before the installed-build and startup checks.
+Logs and the rebuilt click are under `out/jvm-production/` and `out/`.
+
 ## Native dependencies
 
 - **BoringSSL archives land at the top of the build tree**, not in

@@ -222,9 +222,10 @@ linux-port/build-classpath.sh --clean    # gradle clean first (~3 min)
 Wraps the Gradle task `jarForLinuxPort`, defined in
 `linux-port/gradle/jar-for-linux-port.gradle` and applied from the root
 `build.gradle` only when `-PlinuxPort` is set. The task jars AGP's javac output
-instead of dexing it. Flavor: **`afatFdX86_64Debug`** — F-Droid per-ABI x86_64
-matches the host, and `debug` is the only build type that does not run R8, whose
-renaming would break the class names the launcher and shims have to reference.
+instead of dexing it. Flavor: **`afatFdX86_64Jvm`** — the port's unminified build
+with `DEBUG_VERSION` and `DEBUG_PRIVATE_VERSION` disabled. Class names stay
+stable for the launcher and shims without exposing developer menus. The existing
+`.beta` application ID is retained for installed sessions.
 
 `-PlinuxPort` also turns off `externalNativeBuild` in both modules, so no NDK
 build runs and `TMessagesProj/jni/`'s submodules stay clean; the port supplies
@@ -460,7 +461,7 @@ linux-port/run.sh --seconds 60        # timed run: checks run.log, takes a scree
 linux-port/run.sh --seconds 600 --stop-file /tmp/done   # ... or until that file appears
 linux-port/run.sh --fresh             # start from an empty data dir
 linux-port/run.sh --gpu               # try Ganesh again (currently crashes, see below)
-linux-port/run.sh --tl-dump           # put the MTProto request/response JSON back
+linux-port/run.sh --tl-dump           # MTProto JSON in private debug builds only
 linux-port/run.sh -- --window-width 1280   # anything after -- goes to the launcher
 ```
 
@@ -470,11 +471,11 @@ is honoured too), the log is `out/run.log` and timed runs write
 
 A timed run is also the story's check: it requires `boot: Application.onCreate
 returned` and `boot: main activity started` in the log, no `hs_err`, no uncaught
-exception for the whole run, and no `FATAL/tmessages` in the app's own log —
-this build is a `DEBUG_PRIVATE_VERSION`, so the app answers an uncaught exception
-with `System.exit(2)`, which the launcher hangs in, leaving a window that looks
-alive and is not. This now reaches the Telegram intro screen ("Start
-Messaging") and idles cleanly; with a transplanted session it reaches the chat list.
+exception for the whole run, and no `FATAL/tmessages` in the app's own log when
+app logging is enabled. Older private debug builds could hang in `System.exit(2)`
+after a fatal exception, leaving a window that looked alive. This reaches the
+Telegram intro screen ("Start Messaging") and idles cleanly; with a transplanted
+session it reaches the chat list.
 
 `--stop-file PATH` makes `--seconds` an upper bound: the run ends as soon as
 that file appears, so a driving script (`check-chatlist.sh`) can allow for a
@@ -492,8 +493,9 @@ A few things to know about the run:
 - **`-Dtmessages.tldump=0`** switches off `FileLog`'s TL debug dumper, which
   Gson-serializes every request and update. It was three quarters of
   `out/run.log` (6.1 MB down to 1.5 MB over the same 90 s boot) and 310 of the
-  444 classes a native-image trace recorded. `--tl-dump` leaves it on
-  for MTProto debugging; never combine it with a metadata trace.
+  444 classes a native-image trace recorded. `--tl-dump` enables it in private
+  debug builds; never combine it with a metadata trace. The `jvm` build disables
+  the dumper regardless of this option.
 - **`ANDROID_LOG_TAGS=*:V`** is exported, or liblog would drop everything below
   `INFO` and the app's own `FileLog.d` output would never reach `out/run.log`.
 
@@ -661,10 +663,8 @@ messages, emoji panel. What is knowingly missing:
   but it ships a prebuilt `libskia.so` whose libjpeg-turbo choice is known to
   segfault on sampled JPEG decodes. The GraalVM native image (below) is still
   ahead of both.
-- **Debug build.** `afatFdX86_64Debug` is the only usable variant, because R8
-  renames the classes the launcher and the shims name. It is a
-  `DEBUG_PRIVATE_VERSION`, so the app answers any uncaught exception with
-  `System.exit(2)` instead of carrying on.
+- **Unminified app jars.** The `jvm` variant keeps class names and unused code
+  because the launcher and framework use reflection. Its developer flags are off.
 - **Screen-size assumptions.** The window is a phone-sized 960x540 by default;
   the emoji panel is as tall as a phone keyboard and covers the chat, and the
   intro page sits off-centre. Cosmetic atlas layout gaps, not port bugs.
